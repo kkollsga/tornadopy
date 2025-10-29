@@ -1,6 +1,6 @@
 import re
 from pathlib import Path
-from typing import Any, Union
+from typing import Any, Dict, List, Tuple, Union
 
 import numpy as np
 import polars as pl
@@ -12,23 +12,23 @@ class TornadoProcessor:
         self.filepath = Path(filepath)
         if not self.filepath.exists():
             raise FileNotFoundError(f"File not found: {self.filepath}")
-        
+
         try:
             self.sheets_raw = self._load_sheets()
         except Exception as e:
             raise ValueError(f"Error reading Excel file: {e}")
-        
-        self.data: dict[str, pl.DataFrame] = {}
-        self.metadata: dict[str, pl.DataFrame] = {}
-        self.info: dict[str, dict] = {}
-        self.dynamic_fields: dict[str, list[str]] = {}
+
+        self.data: Dict[str, pl.DataFrame] = {}
+        self.metadata: Dict[str, pl.DataFrame] = {}
+        self.info: Dict[str, Dict] = {}
+        self.dynamic_fields: Dict[str, List[str]] = {}
         
         try:
             self._parse_all_sheets()
         except Exception as e:
             print(f"[!] Warning: some sheets failed to parse: {e}")
     
-    def _load_sheets(self) -> dict[str, pl.DataFrame]:
+    def _load_sheets(self) -> Dict[str, pl.DataFrame]:
         sheets = {}
         excel_file = read_excel(str(self.filepath))
         
@@ -48,7 +48,7 @@ class TornadoProcessor:
         name = re.sub(r"_+$", "", name)
         return name or "property"
     
-    def _parse_sheet(self, df: pl.DataFrame) -> tuple[pl.DataFrame, pl.DataFrame, list[str], dict]:
+    def _parse_sheet(self, df: pl.DataFrame) -> Tuple[pl.DataFrame, pl.DataFrame, List[str], Dict]:
         # Find "Case" row
         case_mask = df.select(
             pl.col(df.columns[0]).cast(pl.Utf8).str.strip_chars() == "Case"
@@ -153,10 +153,10 @@ class TornadoProcessor:
             except Exception as e:
                 print(f"[!] Skipped sheet '{sheet_name}': {e}")
     
-    def get_parameters(self) -> list[str]:
+    def get_parameters(self) -> List[str]:
         return list(self.data.keys())
     
-    def get_properties(self, parameter: str = None) -> list[str]:
+    def get_properties(self, parameter: str = None) -> List[str]:
         resolved = self._resolve_parameter(parameter)
         
         if resolved not in self.metadata or self.metadata[resolved].is_empty():
@@ -171,7 +171,7 @@ class TornadoProcessor:
             .to_list()
         )
     
-    def get_unique(self, field: str, parameter: str = None) -> list[str]:
+    def get_unique(self, field: str, parameter: str = None) -> List[str]:
         resolved = self._resolve_parameter(parameter)
         field_norm = self._normalize_fieldname(field)
         
@@ -198,10 +198,10 @@ class TornadoProcessor:
     def get_distribution(
         self,
         parameter: str = None,
-        filters: dict[str, Any] = None,
+        filters: Dict[str, Any] = None,
         multiplier: float = 1.0,
-        options: dict[str, Any] = None
-    ) -> list[float]:
+        options: Dict[str, Any] = None
+    ) -> List[float]:
         result = self.compute(
             stats="distribution",
             parameter=parameter,
@@ -212,11 +212,11 @@ class TornadoProcessor:
         
         return result["distribution"]
     
-    def get_info(self, parameter: str = None) -> dict:
+    def get_info(self, parameter: str = None) -> Dict:
         resolved = self._resolve_parameter(parameter)
         return self.info.get(resolved, {})
     
-    def get_case(self, index: int, parameter: str = None) -> dict:
+    def get_case(self, index: int, parameter: str = None) -> Dict:
         resolved = self._resolve_parameter(parameter)
         df = self.data[resolved]
         
@@ -231,7 +231,7 @@ class TornadoProcessor:
             return list(self.data.keys())[0]
         return parameter
     
-    def _normalize_filters(self, filters: dict[str, Any]) -> dict[str, Any]:
+    def _normalize_filters(self, filters: Dict[str, Any]) -> Dict[str, Any]:
         normalized = {}
         
         for key, value in filters.items():
@@ -248,7 +248,7 @@ class TornadoProcessor:
         
         return normalized
     
-    def _select_columns(self, parameter: str, filters: dict[str, Any]) -> tuple[list[str], list[str]]:
+    def _select_columns(self, parameter: str, filters: Dict[str, Any]) -> Tuple[List[str], List[str]]:
         if parameter not in self.metadata or self.metadata[parameter].is_empty():
             return [], []
         
@@ -284,9 +284,9 @@ class TornadoProcessor:
     def _extract_values(
         self,
         parameter: str,
-        filters: dict[str, Any],
+        filters: Dict[str, Any],
         multiplier: float = 1.0
-    ) -> tuple[np.ndarray, list[str]]:
+    ) -> Tuple[np.ndarray, List[str]]:
         list_fields = {k: v for k, v in filters.items() if isinstance(v, list)}
         
         if list_fields:
@@ -325,9 +325,9 @@ class TornadoProcessor:
     
     def _calculate_weighted_distance(
         self,
-        property_values: dict[str, np.ndarray],
-        targets: dict[str, float],
-        weights: dict[str, float]
+        property_values: Dict[str, np.ndarray],
+        targets: Dict[str, float],
+        weights: Dict[str, float]
     ) -> np.ndarray:
         """Calculate weighted normalized distance for each case.
         
@@ -358,13 +358,13 @@ class TornadoProcessor:
     
     def _calculate_multi_combination_distance(
         self,
-        weighted_combinations: list[dict],
+        weighted_combinations: List[Dict],
         resolved: str,
-        base_filters: dict[str, Any],
+        base_filters: Dict[str, Any],
         multiplier: float,
         case_type: str,
-        skip: list[str]
-    ) -> tuple[np.ndarray, dict]:
+        skip: List[str]
+    ) -> Tuple[np.ndarray, Dict]:
         """Calculate weighted distance across multiple filter+property combinations.
         
         Args:
@@ -442,14 +442,14 @@ class TornadoProcessor:
     
     def _find_closest_cases(
         self,
-        property_values: dict[str, np.ndarray],
-        targets: dict[str, dict[str, float]],
-        weights: dict[str, float],
+        property_values: Dict[str, np.ndarray],
+        targets: Dict[str, Dict[str, float]],
+        weights: Dict[str, float],
         resolved: str,
-        filters: dict[str, Any],
+        filters: Dict[str, Any],
         multiplier: float,
         decimals: int
-    ) -> list[dict]:
+    ) -> List[Dict]:
         """Find closest cases to targets using weighted distance.
         
         Args:
@@ -496,17 +496,17 @@ class TornadoProcessor:
     
     def _compute_p90p10(
         self,
-        property_values: dict[str, np.ndarray],
+        property_values: Dict[str, np.ndarray],
         resolved: str,
-        filters: dict[str, Any],
+        filters: Dict[str, Any],
         multiplier: float,
-        options: dict[str, Any],
+        options: Dict[str, Any],
         case_selection: bool,
-        selection_criteria: dict[str, Any],
-        skip: list[str],
+        selection_criteria: Dict[str, Any],
+        skip: List[str],
         decimals: int,
         _round
-    ) -> dict:
+    ) -> Dict:
         """Compute p90p10 for single or multiple properties."""
         result = {}
         threshold = options.get("p90p10_threshold")
@@ -675,17 +675,17 @@ class TornadoProcessor:
     
     def _compute_mean(
         self,
-        property_values: dict[str, np.ndarray],
+        property_values: Dict[str, np.ndarray],
         resolved: str,
-        filters: dict[str, Any],
+        filters: Dict[str, Any],
         multiplier: float,
-        options: dict[str, Any],
+        options: Dict[str, Any],
         case_selection: bool,
-        selection_criteria: dict[str, Any],
-        skip: list[str],
+        selection_criteria: Dict[str, Any],
+        skip: List[str],
         decimals: int,
         _round
-    ) -> dict:
+    ) -> Dict:
         """Compute mean for single or multiple properties."""
         mean_dict = {prop: _round(np.mean(vals)) for prop, vals in property_values.items()}
         
@@ -734,17 +734,17 @@ class TornadoProcessor:
     
     def _compute_median(
         self,
-        property_values: dict[str, np.ndarray],
+        property_values: Dict[str, np.ndarray],
         resolved: str,
-        filters: dict[str, Any],
+        filters: Dict[str, Any],
         multiplier: float,
-        options: dict[str, Any],
+        options: Dict[str, Any],
         case_selection: bool,
-        selection_criteria: dict[str, Any],
-        skip: list[str],
+        selection_criteria: Dict[str, Any],
+        skip: List[str],
         decimals: int,
         _round
-    ) -> dict:
+    ) -> Dict:
         """Compute median for single or multiple properties."""
         median_dict = {prop: _round(np.median(vals)) for prop, vals in property_values.items()}
         
@@ -793,16 +793,16 @@ class TornadoProcessor:
     
     def _compute_minmax(
         self,
-        property_values: dict[str, np.ndarray],
+        property_values: Dict[str, np.ndarray],
         resolved: str,
-        filters: dict[str, Any],
+        filters: Dict[str, Any],
         multiplier: float,
         case_selection: bool,
-        selection_criteria: dict[str, Any],
-        skip: list[str],
+        selection_criteria: Dict[str, Any],
+        skip: List[str],
         decimals: int,
         _round
-    ) -> dict:
+    ) -> Dict:
         """Compute minmax for single or multiple properties."""
         min_dict = {prop: _round(np.min(vals)) for prop, vals in property_values.items()}
         max_dict = {prop: _round(np.max(vals)) for prop, vals in property_values.items()}
@@ -862,17 +862,17 @@ class TornadoProcessor:
     
     def _compute_percentile(
         self,
-        property_values: dict[str, np.ndarray],
+        property_values: Dict[str, np.ndarray],
         resolved: str,
-        filters: dict[str, Any],
+        filters: Dict[str, Any],
         multiplier: float,
-        options: dict[str, Any],
+        options: Dict[str, Any],
         case_selection: bool,
-        selection_criteria: dict[str, Any],
-        skip: list[str],
+        selection_criteria: Dict[str, Any],
+        skip: List[str],
         decimals: int,
         _round
-    ) -> dict:
+    ) -> Dict:
         """Compute percentile for single or multiple properties."""
         p = options.get("p", 50)
         perc_dict = {prop: _round(np.percentile(vals, p)) for prop, vals in property_values.items()}
@@ -922,10 +922,10 @@ class TornadoProcessor:
     
     def _compute_distribution(
         self,
-        property_values: dict[str, np.ndarray],
+        property_values: Dict[str, np.ndarray],
         decimals: int,
         _round
-    ) -> dict:
+    ) -> Dict:
         """Compute distribution for single or multiple properties."""
         dist_dict = {prop: [_round(v) for v in vals.tolist()] for prop, vals in property_values.items()}
         
@@ -944,11 +944,11 @@ class TornadoProcessor:
         self,
         index: int,
         parameter: str,
-        filters: dict[str, Any],
+        filters: Dict[str, Any],
         multiplier: float,
         value: float,
         decimals: int = 6
-    ) -> dict:
+    ) -> Dict:
         """Extract detailed information for a specific case.
         
         Args:
@@ -1004,14 +1004,14 @@ class TornadoProcessor:
     
     def compute(
         self,
-        stats: Union[str, list[str]],
+        stats: Union[str, List[str]],
         parameter: str = None,
-        filters: dict[str, Any] = None,
+        filters: Dict[str, Any] = None,
         multiplier: float = 1.0,
-        options: dict[str, Any] = None,
+        options: Dict[str, Any] = None,
         case_selection: bool = False,
-        selection_criteria: dict[str, Any] = None
-    ) -> dict:
+        selection_criteria: Dict[str, Any] = None
+    ) -> Dict:
         """Compute statistics for given parameter and filters.
         
         Args:
@@ -1155,14 +1155,14 @@ class TornadoProcessor:
     
     def compute_batch(
         self,
-        stats: Union[str, list[str]],
-        parameters: Union[str, list[str]] = "all",
-        filters: dict[str, Any] = None,
+        stats: Union[str, List[str]],
+        parameters: Union[str, List[str]] = "all",
+        filters: Dict[str, Any] = None,
         multiplier: float = 1.0,
-        options: dict[str, Any] = None,
+        options: Dict[str, Any] = None,
         case_selection: bool = False,
-        selection_criteria: dict[str, Any] = None
-    ) -> Union[dict, list[dict]]:
+        selection_criteria: Dict[str, Any] = None
+    ) -> Union[Dict, List[Dict]]:
         """Compute statistics for multiple parameters.
         
         Args:
@@ -1216,11 +1216,11 @@ class TornadoProcessor:
     
     def get_tornado_data(
         self,
-        parameters: Union[str, list[str]] = "all",
-        filters: dict[str, Any] = None,
+        parameters: Union[str, List[str]] = "all",
+        filters: Dict[str, Any] = None,
         multiplier: float = 1.0,
-        options: dict[str, Any] = None
-    ) -> dict:
+        options: Dict[str, Any] = None
+    ) -> Dict:
         """Get tornado chart data formatted for easy plotting.
         
         Returns a dictionary with parameter names as keys and their p90p10 ranges,
