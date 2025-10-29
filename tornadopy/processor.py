@@ -4,7 +4,7 @@ from typing import Any, Union
 
 import numpy as np
 import polars as pl
-from pyxlsb import read_excel
+from fastexcel import read_excel
 
 
 class TornadoProcessor:

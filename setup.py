@@ -29,7 +29,7 @@ setup(
     install_requires=[
         "numpy>=1.20.0",
         "polars>=0.18.0",
-        "pyxlsb>=1.0.9",
+        "fastexcel>=0.9.0",
         "matplotlib>=3.5.0",
     ],
     extras_require={
