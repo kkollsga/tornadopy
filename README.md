@@ -20,18 +20,10 @@ A Python library for tornado chart generation and analysis. TornadoPy provides t
 
 ## Installation
 
-### From source
+Install from PyPI:
 
 ```bash
-git clone https://github.com/kkollsga/tornadopy.git
-cd tornadopy
-pip install -e .
-```
-
-### For development
-
-```bash
-pip install -e ".[dev]"
+pip install tornadopy
 ```
 
 ## Quick Start
@@ -224,10 +216,10 @@ Case            | Property 1      | Property 2      | ...
 
 ## Requirements
 
-- Python >= 3.8
+- Python >= 3.9
 - numpy >= 1.20.0
 - polars >= 0.18.0
-- pyxlsb >= 1.0.9
+- fastexcel >= 0.9.0
 - matplotlib >= 3.5.0
 
 ## License
