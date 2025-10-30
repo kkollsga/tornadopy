@@ -9,5 +9,12 @@ from .processor import TornadoProcessor
 from .plot import tornado_plot
 from .distribution import distribution_plot
 
-__version__ = "0.1.8"
+# Dynamic version from package metadata
+try:
+    from importlib.metadata import version
+    __version__ = version("tornadopy")
+except Exception:
+    # Fallback for development installs
+    __version__ = "0.0.0.dev"
+
 __all__ = ["TornadoProcessor", "tornado_plot", "distribution_plot"]

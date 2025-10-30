@@ -70,6 +70,7 @@ def tornado_plot(
         "value_offset": 0.01,
         "label_gap": 0.01,
         "left_margin": 0.18,
+        "header_value_spacing": 0.09,  # Spacing between header and value text
         # Feature toggles
         "show_relative_values": False,
         "show_percentage_diff": True,
@@ -149,13 +150,8 @@ def tornado_plot(
     # Space per bar in y-axis units (each bar is centered at integer y position)
     bar_spacing = 1.0  # bars are at y=0, 1, 2, ... with spacing of 1
 
-    # Calculate offset as fraction of bar spacing
-    # This ensures consistent spacing regardless of number of bars
-    # The -0.07 was calibrated for ~10 bars, so we scale accordingly
-    base_offset_ratio = 0.07  # Original manual offset
-
-    # For header/value separation within each bar
-    header_value_offset = base_offset_ratio
+    # For header/value separation within each bar (use customizable setting)
+    header_value_offset = s["header_value_spacing"]
 
     # For reference case label (should be just outside plot area)
     # Calculate based on bar spacing to place it consistently above first bar

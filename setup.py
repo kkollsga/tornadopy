@@ -1,11 +1,17 @@
 from setuptools import setup, find_packages
+import tomli
+
+# Read version from pyproject.toml (single source of truth)
+with open("pyproject.toml", "rb") as f:
+    pyproject = tomli.load(f)
+    version = pyproject["project"]["version"]
 
 with open("README.md", "r", encoding="utf-8") as fh:
     long_description = fh.read()
 
 setup(
     name="tornadopy",
-    version="0.1.8",
+    version=version,
     author="Kristian dF Kollsgård",
     author_email="kkollsg@gmail.com",
     description="A Python library for tornado chart generation and analysis",
