@@ -31,7 +31,7 @@ def tornado_plot(
     """
     # --- Default settings ---
     s = {
-        "figsize": (10, 6),
+        "figsize": (10, 7),
         "dpi": 160,
         "plot_bg_color": "#FAF0E6",
         "figure_bg_color": "white",
@@ -54,7 +54,7 @@ def tornado_plot(
         "title_fontsize": 15,
         "subtitle_fontsize": 11,
         "label_fontsize": 9,
-        "value_fontsize": 8,
+        "value_fontsize": 6,
         "header_fontsize": 7.5,
         "reference_fontsize": 9,
         # Grid
@@ -64,16 +64,16 @@ def tornado_plot(
         "hgrid_alpha": 0.55,
         "vgrid_alpha": 0.3,
         # Values & layout
-        "show_values": ["min", "max"],
-        "show_value_headers": False,
-        "value_format": "{:.2f}",
+        "show_values": ["min", "p10", "p90", "max"],
+        "show_value_headers": True,
+        "value_format": "{:.1f}",
         "value_offset": 0.01,
         "label_gap": 0.01,
         "left_margin": 0.18,
         # Feature toggles
         "show_relative_values": False,
-        "show_percentage_diff": False,
-        "show_bar_shadows": True,  # ✅ only for outer bars
+        "show_percentage_diff": True,
+        "show_bar_shadows": True,
     }
     if settings:
         s.update(settings)
@@ -139,6 +139,28 @@ def tornado_plot(
     ax.set_facecolor(s["plot_bg_color"])
     fig.subplots_adjust(left=s["left_margin"], right=0.95, bottom=0.12, top=0.88)
 
+    # --- Calculate dynamic offsets based on plot dimensions ---
+    # Calculate bars per inch to determine spacing
+    n_bars = len(data)
+    fig_height_inches = s["figsize"][1]
+    plot_area_fraction = 0.88 - 0.12  # top - bottom margin
+    effective_plot_height = fig_height_inches * plot_area_fraction
+
+    # Space per bar in y-axis units (each bar is centered at integer y position)
+    bar_spacing = 1.0  # bars are at y=0, 1, 2, ... with spacing of 1
+
+    # Calculate offset as fraction of bar spacing
+    # This ensures consistent spacing regardless of number of bars
+    # The -0.07 was calibrated for ~10 bars, so we scale accordingly
+    base_offset_ratio = 0.07  # Original manual offset
+
+    # For header/value separation within each bar
+    header_value_offset = base_offset_ratio
+
+    # For reference case label (should be just outside plot area)
+    # Calculate based on bar spacing to place it consistently above first bar
+    ref_case_offset = bar_spacing * 0.7  # 70% of bar spacing above plot
+
     # --- Titles ---
     plot_box = ax.get_position()
     plot_center = (plot_box.x0 + plot_box.x1) / 2
@@ -157,10 +179,11 @@ def tornado_plot(
 
     # --- Reference case line (plotted below bars) ---
     if reference_case is not None:
-        ax.axvline(reference_case, color=s["reference_color"], lw=s["reference_width"], 
+        ax.axvline(reference_case, color=s["reference_color"], lw=s["reference_width"],
                    linestyle='--', zorder=0.5, alpha=0.3)
         # Add label above the plot area (negative y since axis is inverted)
-        ax.text(reference_case, -0.7, 'Ref case', 
+        # Use dynamic offset based on bar spacing
+        ax.text(reference_case, -ref_case_offset, 'Ref case',
                ha='center', va='bottom', fontsize=s["reference_fontsize"],
                color=s["reference_color"], zorder=4)
 
@@ -318,14 +341,13 @@ def tornado_plot(
                 color = "white"
                 effects = white_text_outline
 
-            # Render
+            # Render with dynamic offsets
             if s["show_value_headers"]:
-                header_offset = -0.06
-                value_offset = +0.07
-                ax.text(x_pos, i + header_offset, lbl, ha=ha, va='center',
+                # Use dynamic offset calculated based on plot dimensions
+                ax.text(x_pos, i - header_value_offset, lbl, ha=ha, va='center',
                        fontsize=s["header_fontsize"], fontweight='bold',
                        color=color, zorder=4, path_effects=effects)
-                ax.text(x_pos, i + value_offset, value_str, ha=ha, va='center',
+                ax.text(x_pos, i + header_value_offset, value_str, ha=ha, va='center',
                        fontsize=s["value_fontsize"], color=color, zorder=4,
                        path_effects=effects)
             else:
