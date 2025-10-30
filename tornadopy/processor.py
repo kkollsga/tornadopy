@@ -201,7 +201,7 @@ class TornadoProcessor:
         filters: Dict[str, Any] = None,
         multiplier: float = 1.0,
         options: Dict[str, Any] = None
-    ) -> List[float]:
+    ) -> Union[np.ndarray, Dict[str, np.ndarray]]:
         result = self.compute(
             stats="distribution",
             parameter=parameter,
@@ -926,9 +926,13 @@ class TornadoProcessor:
         decimals: int,
         _round
     ) -> Dict:
-        """Compute distribution for single or multiple properties."""
-        dist_dict = {prop: [_round(v) for v in vals.tolist()] for prop, vals in property_values.items()}
-        
+        """Compute distribution for single or multiple properties.
+
+        Returns numpy arrays directly instead of converting to lists for better performance.
+        """
+        # Use numpy's vectorized rounding instead of Python's round in a loop
+        dist_dict = {prop: np.round(vals, decimals) for prop, vals in property_values.items()}
+
         if len(property_values) == 1:
             return {"distribution": dist_dict[list(property_values.keys())[0]]}
         else:

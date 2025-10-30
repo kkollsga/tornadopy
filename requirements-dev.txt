@@ -1,0 +1,14 @@
+# TornadoPy - Development Dependencies
+# Install with: pip install -r requirements-dev.txt
+
+# Include core dependencies
+-r requirements.txt
+
+# Development tools
+pytest>=7.0.0
+black>=22.0.0
+flake8>=4.0.0
+
+# Build tools
+build>=0.10.0
+twine>=4.0.0

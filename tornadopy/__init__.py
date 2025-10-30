@@ -7,6 +7,7 @@ generating professional tornado charts for uncertainty analysis.
 
 from .processor import TornadoProcessor
 from .plot import tornado_plot
+from .distribution import distribution_plot
 
 __version__ = "0.1.0"
-__all__ = ["TornadoProcessor", "tornado_plot"]
+__all__ = ["TornadoProcessor", "tornado_plot", "distribution_plot"]
