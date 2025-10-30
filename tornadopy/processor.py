@@ -8,7 +8,14 @@ from fastexcel import read_excel
 
 
 class TornadoProcessor:
-    def __init__(self, filepath: str):
+    def __init__(self, filepath: str, multiplier: float = 1.0, base_case: str = None):
+        """Initialize processor with Excel file path and optional parameters.
+        
+        Args:
+            filepath: Path to Excel file
+            multiplier: Default multiplier to apply to all operations (default 1.0)
+            base_case: Name of sheet containing base/reference case data
+        """
         self.filepath = Path(filepath)
         if not self.filepath.exists():
             raise FileNotFoundError(f"File not found: {self.filepath}")
@@ -22,13 +29,30 @@ class TornadoProcessor:
         self.metadata: Dict[str, pl.DataFrame] = {}
         self.info: Dict[str, Dict] = {}
         self.dynamic_fields: Dict[str, List[str]] = {}
-        
+        self.default_multiplier: float = multiplier
+        self.stored_filters: Dict[str, Dict[str, Any]] = {}
+        self.base_case_parameter: str = base_case
+        self.base_case_values: Dict[str, float] = {}
+        self.reference_case_values: Dict[str, float] = {}
+
         try:
             self._parse_all_sheets()
         except Exception as e:
             print(f"[!] Warning: some sheets failed to parse: {e}")
+
+        # Extract base case and reference case if specified
+        if base_case:
+            try:
+                self._extract_base_and_reference_cases()
+            except Exception as e:
+                print(f"[!] Warning: failed to extract base/reference case from '{base_case}': {e}")
+    
+    # ================================================================
+    # INITIALIZATION & PARSING
+    # ================================================================
     
     def _load_sheets(self) -> Dict[str, pl.DataFrame]:
+        """Load all sheets from Excel file into Polars DataFrames."""
         sheets = {}
         excel_file = read_excel(str(self.filepath))
         
@@ -43,12 +67,14 @@ class TornadoProcessor:
         return sheets
     
     def _normalize_fieldname(self, name: str) -> str:
+        """Normalize field name to lowercase with underscores."""
         name = str(name).strip().lower()
         name = re.sub(r"[^a-z0-9_]+", "_", name)
         name = re.sub(r"_+$", "", name)
         return name or "property"
     
     def _parse_sheet(self, df: pl.DataFrame) -> Tuple[pl.DataFrame, pl.DataFrame, List[str], Dict]:
+        """Parse individual sheet into data, metadata, dynamic fields, and info."""
         # Find "Case" row
         case_mask = df.select(
             pl.col(df.columns[0]).cast(pl.Utf8).str.strip_chars() == "Case"
@@ -143,6 +169,7 @@ class TornadoProcessor:
         return data_block, metadata_df, dynamic_labels, info_dict
     
     def _parse_all_sheets(self):
+        """Parse all loaded sheets and store results."""
         for sheet_name, df_raw in self.sheets_raw.items():
             try:
                 data, metadata, fields, info = self._parse_sheet(df_raw)
@@ -153,85 +180,150 @@ class TornadoProcessor:
             except Exception as e:
                 print(f"[!] Skipped sheet '{sheet_name}': {e}")
     
-    def get_parameters(self) -> List[str]:
-        return list(self.data.keys())
+    # ================================================================
+    # BASE & REFERENCE CASE EXTRACTION
+    # ================================================================
     
-    def get_properties(self, parameter: str = None) -> List[str]:
-        resolved = self._resolve_parameter(parameter)
-        
-        if resolved not in self.metadata or self.metadata[resolved].is_empty():
-            raise ValueError(f"No properties found in sheet '{resolved}'")
-        
-        return (
-            self.metadata[resolved]
-            .select("property")
-            .unique()
-            .sort("property")
-            .to_series()
-            .to_list()
-        )
-    
-    def get_unique(self, field: str, parameter: str = None) -> List[str]:
-        resolved = self._resolve_parameter(parameter)
-        field_norm = self._normalize_fieldname(field)
-        
-        if resolved not in self.dynamic_fields:
-            raise ValueError(f"No dynamic fields for '{resolved}'")
-        
-        available = self.dynamic_fields[resolved]
-        if field_norm not in available:
-            raise ValueError(f"'{field}' not found. Available: {available}")
-        
-        if self.metadata[resolved].is_empty():
-            return []
-        
-        return (
-            self.metadata[resolved]
-            .select(field_norm)
-            .filter(pl.col(field_norm).is_not_null())
-            .unique()
-            .sort(field_norm)
-            .to_series()
-            .to_list()
-        )
-    
-    def get_distribution(
+    def _extract_case(
         self,
-        parameter: str = None,
+        parameter: str,
+        case_index: int,
         filters: Dict[str, Any] = None,
-        multiplier: float = 1.0,
-        options: Dict[str, Any] = None
-    ) -> Union[np.ndarray, Dict[str, np.ndarray]]:
-        result = self.compute(
-            stats="distribution",
-            parameter=parameter,
+        multiplier: float = None
+    ) -> Dict[str, float]:
+        """Extract values for a specific case index from a parameter.
+        
+        Args:
+            parameter: Parameter name
+            case_index: Index of case to extract (0 for base, 1 for reference)
+            filters: Optional filters to apply (zones, etc.)
+            multiplier: Multiplier to apply (defaults to instance default_multiplier)
+        
+        Returns:
+            Dictionary mapping property names to values for that case
+        """
+        if parameter not in self.data:
+            return {}
+        
+        if multiplier is None:
+            multiplier = self.default_multiplier
+        
+        case_df = self.data[parameter]
+        if len(case_df) <= case_index:
+            return {}
+        
+        # Get all properties for this parameter
+        try:
+            properties = self.properties(parameter)
+        except:
+            properties = []
+        
+        # Prepare filters (remove property key if present, we'll add it per property)
+        base_filters = dict(filters) if filters else {}
+        base_filters.pop("property", None)
+        
+        # Extract value for each property at the given case index
+        case_values = {}
+        for prop in properties:
+            try:
+                prop_filters = {**base_filters, "property": prop}
+                values, _ = self._extract_values(parameter, prop_filters, multiplier)
+                if len(values) > case_index:
+                    case_values[prop] = float(values[case_index])
+            except:
+                pass
+        
+        return case_values
+    
+    def _extract_base_and_reference_cases(self, filters: Dict[str, Any] = None):
+        """Extract and cache base case (index 0) and reference case (index 1) from base_case parameter.
+        
+        This method is primarily used during initialization to populate the cached
+        base_case_values and reference_case_values dictionaries with default_multiplier.
+        For runtime extraction with custom filters/multipliers, use the public 
+        base_case() and ref_case() methods instead.
+        
+        Args:
+            filters: Optional filters to apply when extracting (zones, etc.)
+        """
+        if not self.base_case_parameter:
+            return
+        
+        # Extract base case (index 0)
+        self.base_case_values = self._extract_case(
+            self.base_case_parameter, 
+            case_index=0, 
             filters=filters,
-            multiplier=multiplier,
-            options=options
+            multiplier=self.default_multiplier
         )
         
-        return result["distribution"]
+        # Extract reference case (index 1) if it exists
+        self.reference_case_values = self._extract_case(
+            self.base_case_parameter,
+            case_index=1,
+            filters=filters,
+            multiplier=self.default_multiplier
+        )
     
-    def get_info(self, parameter: str = None) -> Dict:
-        resolved = self._resolve_parameter(parameter)
-        return self.info.get(resolved, {})
+    # ================================================================
+    # FILTER MANAGEMENT
+    # ================================================================
     
-    def get_case(self, index: int, parameter: str = None) -> Dict:
-        resolved = self._resolve_parameter(parameter)
-        df = self.data[resolved]
-        
-        if index < 0 or index >= len(df):
-            raise IndexError(f"Index {index} out of range (0–{len(df)-1})")
-        
-        return df[index].to_dicts()[0]
+    def _resolve_filter_preset(self, filters: Union[Dict[str, Any], str]) -> Dict[str, Any]:
+        """Resolve filter preset if string, otherwise return dict as-is."""
+        if isinstance(filters, str):
+            return self.get_filter(filters)
+        return filters if filters is not None else {}
+    
+    def set_filter(self, name: str, filters: Dict[str, Any]) -> None:
+        """Store a named filter preset for reuse.
+
+        Args:
+            name: Name for the filter preset
+            filters: Dictionary of filters to store
+            
+        Examples:
+            processor.set_filter('north_zones', {'zones': ['z1', 'z2', 'z3']})
+            processor.set_filter('stoiip_only', {'property': 'stoiip'})
+        """
+        self.stored_filters[name] = filters
+
+    def get_filter(self, name: str) -> Dict[str, Any]:
+        """Retrieve a stored filter preset.
+
+        Args:
+            name: Name of the filter preset
+
+        Returns:
+            Dictionary of filters
+
+        Raises:
+            KeyError: If filter name not found
+        """
+        if name not in self.stored_filters:
+            raise KeyError(f"Filter preset '{name}' not found. Available: {list(self.stored_filters.keys())}")
+        return self.stored_filters[name]
+
+    def list_filters(self) -> List[str]:
+        """List all stored filter preset names.
+
+        Returns:
+            List of filter preset names
+        """
+        return list(self.stored_filters.keys())
+    
+    # ================================================================
+    # DATA EXTRACTION & VALIDATION
+    # ================================================================
     
     def _resolve_parameter(self, parameter: str = None) -> str:
+        """Resolve parameter name, defaulting to first if None."""
         if parameter is None:
-            # Default to first parameter if not specified
             return list(self.data.keys())[0]
         return parameter
     
     def _normalize_filters(self, filters: Dict[str, Any]) -> Dict[str, Any]:
+        """Normalize filter keys and string values to lowercase."""
         normalized = {}
         
         for key, value in filters.items():
@@ -249,6 +341,7 @@ class TornadoProcessor:
         return normalized
     
     def _select_columns(self, parameter: str, filters: Dict[str, Any]) -> Tuple[List[str], List[str]]:
+        """Select columns matching filters and return column names and sources."""
         if parameter not in self.metadata or self.metadata[parameter].is_empty():
             return [], []
         
@@ -287,6 +380,7 @@ class TornadoProcessor:
         filters: Dict[str, Any],
         multiplier: float = 1.0
     ) -> Tuple[np.ndarray, List[str]]:
+        """Extract and sum values for columns matching filters."""
         list_fields = {k: v for k, v in filters.items() if isinstance(v, list)}
         
         if list_fields:
@@ -322,6 +416,65 @@ class TornadoProcessor:
         ) * multiplier
         
         return values, sources
+    
+    def _validate_numeric(self, values: np.ndarray, description: str) -> np.ndarray:
+        """Validate array contains finite numeric values."""
+        if values.size == 0 or not np.isfinite(values).any():
+            raise ValueError(f"No numeric data found for {description}")
+        
+        return values[np.isfinite(values)]
+    
+    # ================================================================
+    # CASE SELECTION HELPERS
+    # ================================================================
+    
+    def _prepare_weighted_case_selection(
+        self,
+        property_values: Dict[str, np.ndarray],
+        selection_criteria: Dict[str, Any],
+        resolved: str,
+        filters: Dict[str, Any],
+        multiplier: float,
+        skip: List[str]
+    ) -> Tuple[Dict[str, np.ndarray], Dict[str, float], List[str]]:
+        """Extract weighted properties and compute weights for case selection.
+        
+        This eliminates code duplication across mean/median/percentile compute methods.
+        
+        Args:
+            property_values: Already extracted property values
+            selection_criteria: Criteria containing weights
+            resolved: Resolved parameter name
+            filters: Applied filters
+            multiplier: Applied multiplier
+            skip: Skip list for error handling
+            
+        Returns:
+            Tuple of (weighted_property_values, weights, errors)
+        """
+        errors = []
+        
+        # Get or create default weights
+        weights = selection_criteria.get("weights")
+        if not weights:
+            weights = {prop: 1.0 / len(property_values) for prop in property_values.keys()}
+        
+        # Extract additional properties if needed for weighting
+        weighted_property_values = dict(property_values)
+        non_property_filters = {k: v for k, v in filters.items() if k != "property"}
+        
+        for prop in weights.keys():
+            if prop not in weighted_property_values:
+                try:
+                    prop_filters = {**non_property_filters, "property": prop}
+                    prop_vals, _ = self._extract_values(resolved, prop_filters, multiplier)
+                    prop_vals = self._validate_numeric(prop_vals, prop)
+                    weighted_property_values[prop] = prop_vals
+                except Exception as e:
+                    if "errors" not in skip:
+                        errors.append(f"Failed to extract {prop} for weighting: {e}")
+        
+        return weighted_property_values, weights, errors
     
     def _calculate_weighted_distance(
         self,
@@ -494,6 +647,72 @@ class TornadoProcessor:
         
         return closest_cases
     
+    def _get_case_details(
+        self,
+        index: int,
+        parameter: str,
+        filters: Dict[str, Any],
+        multiplier: float,
+        value: float,
+        decimals: int = 6
+    ) -> Dict:
+        """Extract detailed information for a specific case.
+        
+        Args:
+            index: Case index
+            parameter: Parameter name
+            filters: Applied filters
+            multiplier: Applied multiplier
+            value: Computed value for this case (already with multiplier applied)
+            decimals: Number of decimal places for rounding
+            
+        Returns:
+            Dictionary with case details including idx, property value, filters, multiplier, properties, and variables
+        """
+        case_data = self.case(index, parameter=parameter)
+        
+        # Get all available properties for this parameter
+        try:
+            all_properties = self.properties(parameter)
+        except:
+            all_properties = []
+        
+        # Calculate all property values for this case WITHOUT multiplier
+        properties_dict = {}
+        non_property_filters = {k: v for k, v in filters.items() if k != "property"}
+        
+        for prop in all_properties:
+            try:
+                prop_filters = {**non_property_filters, "property": prop}
+                values, _ = self._extract_values(parameter, prop_filters, multiplier=1.0)  # No multiplier
+                if index < len(values):
+                    properties_dict[prop] = round(values[index], decimals)
+            except:
+                # Skip properties that can't be calculated
+                pass
+        
+        # Handle property filter - if it's a list, use first property; if string, use it
+        property_filter = filters.get("property")
+        if isinstance(property_filter, list):
+            property_key = property_filter[0] if property_filter else "value"
+        else:
+            property_key = property_filter if property_filter else "value"
+        
+        details = {
+            "idx": index,
+            **{property_key: round(value, decimals)},
+            **{k: v for k, v in filters.items() if k != "property"},
+            "multiplier": multiplier,
+            "properties": properties_dict,
+            "variables": {k: v for k, v in case_data.items() if k.startswith("$")}
+        }
+        
+        return details
+    
+    # ================================================================
+    # STATISTICS COMPUTATION
+    # ================================================================
+    
     def _compute_p90p10(
         self,
         property_values: Dict[str, np.ndarray],
@@ -507,9 +726,9 @@ class TornadoProcessor:
         decimals: int,
         _round
     ) -> Dict:
-        """Compute p90p10 for single or multiple properties."""
+        """Compute p10 and p90 percentiles with optional case selection."""
         result = {}
-        threshold = options.get("p90p10_threshold")
+        threshold = options.get("p90p10_threshold", 10)
         
         # Calculate percentiles for each property in property_values
         p10_dict = {}
@@ -524,8 +743,8 @@ class TornadoProcessor:
                     )
             else:
                 p10_val, p90_val = np.percentile(prop_vals, [10, 90])
-                p10_dict[prop] = _round(p10_val)
-                p90_dict[prop] = _round(p90_val)
+                p10_dict[prop] = _round(float(p10_val))
+                p90_dict[prop] = _round(float(p90_val))
         
         if not p10_dict or not p90_dict:
             return result
@@ -627,26 +846,13 @@ class TornadoProcessor:
                 result["closest_cases"] = closest_cases
             else:
                 # Use simple property weights
-                weights = selection_criteria.get("weights")
-                if not weights:
-                    # Default: equal weights for all properties in property_values
-                    weights = {prop: 1.0 / len(property_values) for prop in property_values.keys()}
+                weighted_property_values, weights, errors = self._prepare_weighted_case_selection(
+                    property_values, selection_criteria, resolved, filters, multiplier, skip
+                )
                 
-                # Extract additional properties if needed for weighting
-                weighted_property_values = dict(property_values)
-                non_property_filters = {k: v for k, v in filters.items() if k != "property"}
-                
-                for prop in weights.keys():
-                    if prop not in weighted_property_values:
-                        try:
-                            prop_filters = {**non_property_filters, "property": prop}
-                            prop_vals, _ = self._extract_values(resolved, prop_filters, multiplier)
-                            prop_vals = self._validate_numeric(prop_vals, prop)
-                            weighted_property_values[prop] = prop_vals
-                        except Exception as e:
-                            if "errors" not in skip:
-                                result["errors"] = result.get("errors", [])
-                                result["errors"].append(f"Failed to extract {prop} for weighting: {e}")
+                if errors and "errors" not in skip:
+                    result["errors"] = result.get("errors", [])
+                    result["errors"].extend(errors)
                 
                 # Calculate percentiles for weighted properties
                 weighted_p10_dict = {}
@@ -686,8 +892,8 @@ class TornadoProcessor:
         decimals: int,
         _round
     ) -> Dict:
-        """Compute mean for single or multiple properties."""
-        mean_dict = {prop: _round(np.mean(vals)) for prop, vals in property_values.items()}
+        """Compute mean with optional case selection."""
+        mean_dict = {prop: _round(float(np.mean(vals))) for prop, vals in property_values.items()}
         
         result = {}
         if len(property_values) == 1:
@@ -697,23 +903,13 @@ class TornadoProcessor:
         
         # Handle case selection
         if case_selection and "closest_case" not in skip:
-            weights = selection_criteria.get("weights")
-            if not weights:
-                weights = {prop: 1.0 / len(property_values) for prop in property_values.keys()}
+            weighted_property_values, weights, errors = self._prepare_weighted_case_selection(
+                property_values, selection_criteria, resolved, filters, multiplier, skip
+            )
             
-            # Extract additional properties if needed
-            weighted_property_values = dict(property_values)
-            non_property_filters = {k: v for k, v in filters.items() if k != "property"}
-            
-            for prop in weights.keys():
-                if prop not in weighted_property_values:
-                    try:
-                        prop_filters = {**non_property_filters, "property": prop}
-                        prop_vals, _ = self._extract_values(resolved, prop_filters, multiplier)
-                        prop_vals = self._validate_numeric(prop_vals, prop)
-                        weighted_property_values[prop] = prop_vals
-                    except:
-                        pass
+            if errors and "errors" not in skip:
+                result["errors"] = result.get("errors", [])
+                result["errors"].extend(errors)
             
             # Calculate means for weighted properties
             weighted_mean_dict = {}
@@ -745,8 +941,8 @@ class TornadoProcessor:
         decimals: int,
         _round
     ) -> Dict:
-        """Compute median for single or multiple properties."""
-        median_dict = {prop: _round(np.median(vals)) for prop, vals in property_values.items()}
+        """Compute median with optional case selection."""
+        median_dict = {prop: _round(float(np.median(vals))) for prop, vals in property_values.items()}
         
         result = {}
         if len(property_values) == 1:
@@ -756,23 +952,13 @@ class TornadoProcessor:
         
         # Handle case selection
         if case_selection and "closest_case" not in skip:
-            weights = selection_criteria.get("weights")
-            if not weights:
-                weights = {prop: 1.0 / len(property_values) for prop in property_values.keys()}
+            weighted_property_values, weights, errors = self._prepare_weighted_case_selection(
+                property_values, selection_criteria, resolved, filters, multiplier, skip
+            )
             
-            # Extract additional properties if needed
-            weighted_property_values = dict(property_values)
-            non_property_filters = {k: v for k, v in filters.items() if k != "property"}
-            
-            for prop in weights.keys():
-                if prop not in weighted_property_values:
-                    try:
-                        prop_filters = {**non_property_filters, "property": prop}
-                        prop_vals, _ = self._extract_values(resolved, prop_filters, multiplier)
-                        prop_vals = self._validate_numeric(prop_vals, prop)
-                        weighted_property_values[prop] = prop_vals
-                    except:
-                        pass
+            if errors and "errors" not in skip:
+                result["errors"] = result.get("errors", [])
+                result["errors"].extend(errors)
             
             # Calculate medians for weighted properties
             weighted_median_dict = {}
@@ -803,10 +989,10 @@ class TornadoProcessor:
         decimals: int,
         _round
     ) -> Dict:
-        """Compute minmax for single or multiple properties."""
-        min_dict = {prop: _round(np.min(vals)) for prop, vals in property_values.items()}
-        max_dict = {prop: _round(np.max(vals)) for prop, vals in property_values.items()}
-        
+        """Compute min and max with exact case matching."""
+        min_dict = {prop: _round(float(np.min(vals))) for prop, vals in property_values.items()}
+        max_dict = {prop: _round(float(np.max(vals))) for prop, vals in property_values.items()}
+
         if len(property_values) == 1:
             prop = list(property_values.keys())[0]
             result = {"minmax": [min_dict[prop], max_dict[prop]]}
@@ -873,9 +1059,9 @@ class TornadoProcessor:
         decimals: int,
         _round
     ) -> Dict:
-        """Compute percentile for single or multiple properties."""
+        """Compute arbitrary percentile with optional case selection."""
         p = options.get("p", 50)
-        perc_dict = {prop: _round(np.percentile(vals, p)) for prop, vals in property_values.items()}
+        perc_dict = {prop: _round(float(np.percentile(vals, p))) for prop, vals in property_values.items()}
         
         result = {}
         if len(property_values) == 1:
@@ -885,23 +1071,13 @@ class TornadoProcessor:
         
         # Handle case selection
         if case_selection and "closest_case" not in skip:
-            weights = selection_criteria.get("weights")
-            if not weights:
-                weights = {prop: 1.0 / len(property_values) for prop in property_values.keys()}
+            weighted_property_values, weights, errors = self._prepare_weighted_case_selection(
+                property_values, selection_criteria, resolved, filters, multiplier, skip
+            )
             
-            # Extract additional properties if needed
-            weighted_property_values = dict(property_values)
-            non_property_filters = {k: v for k, v in filters.items() if k != "property"}
-            
-            for prop in weights.keys():
-                if prop not in weighted_property_values:
-                    try:
-                        prop_filters = {**non_property_filters, "property": prop}
-                        prop_vals, _ = self._extract_values(resolved, prop_filters, multiplier)
-                        prop_vals = self._validate_numeric(prop_vals, prop)
-                        weighted_property_values[prop] = prop_vals
-                    except:
-                        pass
+            if errors and "errors" not in skip:
+                result["errors"] = result.get("errors", [])
+                result["errors"].extend(errors)
             
             # Calculate percentiles for weighted properties
             weighted_perc_dict = {}
@@ -926,9 +1102,9 @@ class TornadoProcessor:
         decimals: int,
         _round
     ) -> Dict:
-        """Compute distribution for single or multiple properties.
-
-        Returns numpy arrays directly instead of converting to lists for better performance.
+        """Return full distribution of values (no aggregation).
+        
+        Returns numpy arrays directly for better performance.
         """
         # Use numpy's vectorized rounding instead of Python's round in a loop
         dist_dict = {prop: np.round(vals, decimals) for prop, vals in property_values.items()}
@@ -938,113 +1114,299 @@ class TornadoProcessor:
         else:
             return {"distribution": dist_dict}
     
-    def _validate_numeric(self, values: np.ndarray, description: str) -> np.ndarray:
-        if values.size == 0 or not np.isfinite(values).any():
-            raise ValueError(f"No numeric data found for {description}")
-        
-        return values[np.isfinite(values)]
+    # ================================================================
+    # PUBLIC API - INFORMATION ACCESS
+    # ================================================================
     
-    def _get_case_details(
-        self,
-        index: int,
-        parameter: str,
-        filters: Dict[str, Any],
-        multiplier: float,
-        value: float,
-        decimals: int = 6
-    ) -> Dict:
-        """Extract detailed information for a specific case.
+    def parameters(self) -> List[str]:
+        """Get list of all available parameter names.
+        
+        Returns:
+            List of parameter names (sheet names from Excel file)
+        """
+        return list(self.data.keys())
+    
+    def properties(self, parameter: str = None) -> List[str]:
+        """Get list of unique properties for a parameter.
         
         Args:
-            index: Case index
-            parameter: Parameter name
-            filters: Applied filters
-            multiplier: Applied multiplier
-            value: Computed value for this case (already with multiplier applied)
-            decimals: Number of decimal places for rounding
+            parameter: Parameter name (defaults to first if only one)
             
         Returns:
-            Dictionary with case details including idx, property value, filters, multiplier, properties, and variables
+            Sorted list of property names
         """
-        case_data = self.get_case(index, parameter=parameter)
+        resolved = self._resolve_parameter(parameter)
         
-        # Get all available properties for this parameter
-        try:
-            all_properties = self.get_properties(parameter)
-        except:
-            all_properties = []
+        if resolved not in self.metadata or self.metadata[resolved].is_empty():
+            raise ValueError(f"No properties found in sheet '{resolved}'")
         
-        # Calculate all property values for this case WITHOUT multiplier
-        properties_dict = {}
-        non_property_filters = {k: v for k, v in filters.items() if k != "property"}
+        return (
+            self.metadata[resolved]
+            .select("property")
+            .unique()
+            .sort("property")
+            .to_series()
+            .to_list()
+        )
+    
+    def unique_values(self, field: str, parameter: str = None) -> List[str]:
+        """Get unique values for a dynamic field (e.g., zones, regions).
         
-        for prop in all_properties:
-            try:
-                prop_filters = {**non_property_filters, "property": prop}
-                values, _ = self._extract_values(parameter, prop_filters, multiplier=1.0)  # No multiplier
-                if index < len(values):
-                    properties_dict[prop] = round(values[index], decimals)
-            except:
-                # Skip properties that can't be calculated
-                pass
+        Args:
+            field: Field name to get unique values for
+            parameter: Parameter name (defaults to first if only one)
+            
+        Returns:
+            Sorted list of unique values for the field
+        """
+        resolved = self._resolve_parameter(parameter)
+        field_norm = self._normalize_fieldname(field)
         
-        # Handle property filter - if it's a list, use first property; if string, use it
-        property_filter = filters.get("property")
-        if isinstance(property_filter, list):
-            property_key = property_filter[0] if property_filter else "value"
+        if resolved not in self.dynamic_fields:
+            raise ValueError(f"No dynamic fields for '{resolved}'")
+        
+        available = self.dynamic_fields[resolved]
+        if field_norm not in available:
+            raise ValueError(f"'{field}' not found. Available: {available}")
+        
+        if self.metadata[resolved].is_empty():
+            return []
+        
+        return (
+            self.metadata[resolved]
+            .select(field_norm)
+            .filter(pl.col(field_norm).is_not_null())
+            .unique()
+            .sort(field_norm)
+            .to_series()
+            .to_list()
+        )
+    
+    def info(self, parameter: str = None) -> Dict:
+        """Get metadata info for a parameter.
+        
+        Args:
+            parameter: Parameter name (defaults to first if only one)
+            
+        Returns:
+            Dictionary of metadata extracted from rows above the data table
+        """
+        resolved = self._resolve_parameter(parameter)
+        return self.info.get(resolved, {})
+    
+    def case(self, index: int, parameter: str = None) -> Dict:
+        """Get data for a specific case by index.
+        
+        Args:
+            index: Case index (row number, 0-based)
+            parameter: Parameter name (defaults to first if only one)
+            
+        Returns:
+            Dictionary of all values for that case
+            
+        Raises:
+            IndexError: If index out of range
+        """
+        resolved = self._resolve_parameter(parameter)
+        df = self.data[resolved]
+        
+        if index < 0 or index >= len(df):
+            raise IndexError(f"Index {index} out of range (0–{len(df)-1})")
+        
+        return df[index].to_dicts()[0]
+    
+    # ================================================================
+    # PUBLIC API - BASE & REFERENCE CASE
+    # ================================================================
+    
+    def _get_case_values(
+        self,
+        case_type: str,
+        property: str = None,
+        filters: Union[Dict[str, Any], str] = None,
+        multiplier: float = None
+    ) -> Union[float, Dict[str, float]]:
+        """Shared logic for base_case and ref_case methods.
+        
+        Args:
+            case_type: Either 'base' or 'reference' to identify which case to extract
+            property: Property name (if None, returns all values)
+            filters: Filters to apply or name of stored filter preset
+            multiplier: Multiplier to apply (defaults to instance default_multiplier)
+        
+        Returns:
+            Single value if property specified, dict of all values otherwise
+        """
+        # Resolve filter preset if string provided
+        filters = self._resolve_filter_preset(filters)
+        
+        # Extract property from filters if present (takes precedence)
+        if filters and 'property' in filters:
+            filters = filters.copy()
+            property = filters.pop('property')
+        
+        # Normalize property name to lowercase
+        if property:
+            property = self._normalize_fieldname(property)
+        
+        # Use default multiplier if not specified
+        if multiplier is None:
+            multiplier = self.default_multiplier
+        
+        # Extract case values - either with filters or from cached values
+        if filters or multiplier != self.default_multiplier:
+            # Extract directly with specified filters and multiplier
+            case_index = 0 if case_type == 'base' else 1
+            case_values = self._extract_case(
+                self.base_case_parameter,
+                case_index=case_index,
+                filters=filters,
+                multiplier=multiplier
+            )
         else:
-            property_key = property_filter if property_filter else "value"
+            # Use cached values (no filters, default multiplier)
+            case_values = self.base_case_values if case_type == 'base' else self.reference_case_values
         
-        details = {
-            "idx": index,
-            **{property_key: round(value, decimals)},
-            **{k: v for k, v in filters.items() if k != "property"},
-            "multiplier": multiplier,
-            "properties": properties_dict,
-            "variables": {k: v for k, v in case_data.items() if k.startswith("$")}
-        }
+        # Return specific property or all values
+        if property:
+            if property not in case_values:
+                raise KeyError(
+                    f"Property '{property}' not found in case. "
+                    f"Available: {list(case_values.keys())}"
+                )
+            return case_values[property]
         
-        return details
+        return case_values.copy()
+    
+    def base_case(
+        self,
+        property: str = None,
+        filters: Union[Dict[str, Any], str] = None,
+        multiplier: float = None
+    ) -> Union[float, Dict[str, float]]:
+        """Get base case value(s) from first row of base_case parameter.
+        
+        Args:
+            property: Property name (if None, returns all base case values)
+            filters: Filters dict or stored filter name
+            multiplier: Override default multiplier
+            
+        Returns:
+            Single value if property specified, dict of all values otherwise
+            
+        Examples:
+            # Get all base case values
+            base = processor.base_case()
+            
+            # Get specific property
+            stoiip_base = processor.base_case('stoiip')
+            
+            # With filters
+            stoiip_base = processor.base_case('stoiip', filters={'zones': ['z1', 'z2']})
+            
+            # With stored filter
+            stoiip_base = processor.base_case('stoiip', filters='north_zones')
+            
+            # Override multiplier
+            stoiip_base = processor.base_case('stoiip', multiplier=1e-6)
+        """
+        return self._get_case_values('base', property, filters, multiplier)
+    
+    def ref_case(
+        self,
+        property: str = None,
+        filters: Union[Dict[str, Any], str] = None,
+        multiplier: float = None
+    ) -> Union[float, Dict[str, float]]:
+        """Get reference case value(s) from second row of base_case parameter.
+        
+        Args:
+            property: Property name (if None, returns all reference case values)
+            filters: Filters dict or stored filter name
+            multiplier: Override default multiplier
+            
+        Returns:
+            Single value if property specified, dict of all values otherwise
+            
+        Examples:
+            # Get all reference case values
+            ref = processor.ref_case()
+            
+            # Get specific property
+            stoiip_ref = processor.ref_case('stoiip')
+            
+            # With filters
+            stoiip_ref = processor.ref_case('stoiip', filters={'zones': ['z1', 'z2']})
+            
+            # With stored filter
+            stoiip_ref = processor.ref_case('stoiip', filters='north_zones')
+            
+            # Override multiplier
+            stoiip_ref = processor.ref_case('stoiip', multiplier=1e-6)
+        """
+        return self._get_case_values('reference', property, filters, multiplier)
+    
+    # ================================================================
+    # PUBLIC API - STATISTICS COMPUTATION
+    # ================================================================
     
     def compute(
         self,
         stats: Union[str, List[str]],
         parameter: str = None,
-        filters: Dict[str, Any] = None,
-        multiplier: float = 1.0,
+        filters: Union[Dict[str, Any], str] = None,
+        multiplier: float = None,
         options: Dict[str, Any] = None,
         case_selection: bool = False,
         selection_criteria: Dict[str, Any] = None
     ) -> Dict:
-        """Compute statistics for given parameter and filters.
-        
+        """Compute statistics for a single parameter with filters.
+
         Args:
             stats: Statistic(s) to compute ('p90p10', 'mean', 'median', 'minmax', 'percentile', 'distribution')
             parameter: Parameter name (defaults to first if only one available)
-            filters: Filters to apply (zones, property, etc.)
-            multiplier: Multiplier to apply to values
+            filters: Filters dict or stored filter name
+            multiplier: Override default multiplier
             options: Stats-specific options:
                 - decimals: Number of decimal places (default 6)
-                - p90p10_threshold: Minimum case count for p90p10
+                - p90p10_threshold: Minimum case count for p90p10 (default 10)
                 - p: Percentile value for 'percentile' stat (default 50)
                 - skip: List of keys to skip in output (e.g., ['errors', 'sources'])
             case_selection: Whether to find closest matching cases (default False)
             selection_criteria: Criteria for selecting cases (only used if case_selection=True):
                 - weights: dict of property weights (e.g., {'stoiip': 0.6, 'giip': 0.4})
-                - combinations: list of filter+property combinations for complex weighting:
-                  [
-                      {
-                          "filters": {"zones": [...]},
-                          "properties": {"stoiip": 0.3, "giip": 0.2}
-                      },
-                      ...
-                  ]
-        
+                - combinations: list of filter+property combinations for complex weighting
+
         Returns:
             Dictionary with computed statistics and optionally closest_cases
+            
+        Examples:
+            # Simple mean computation
+            result = processor.compute('mean', filters={'property': 'stoiip'})
+            
+            # Multiple stats with stored filter
+            result = processor.compute(['mean', 'p90p10'], filters='north_zones')
+            
+            # With custom multiplier
+            result = processor.compute('p90p10', filters='north_zones', multiplier=1e-6)
+            
+            # With case selection
+            result = processor.compute(
+                'mean',
+                filters={'property': 'stoiip'},
+                case_selection=True,
+                selection_criteria={'weights': {'stoiip': 0.6, 'giip': 0.4}}
+            )
         """
         resolved = self._resolve_parameter(parameter)
-        filters = filters or {}
+        
+        # Resolve filter preset if string provided
+        filters = self._resolve_filter_preset(filters)
+        
+        # Use default multiplier if not specified
+        if multiplier is None:
+            multiplier = self.default_multiplier
+
         options = options or {}
         selection_criteria = selection_criteria or {}
         skip = options.get("skip", [])
@@ -1082,7 +1444,7 @@ class TornadoProcessor:
                         result["errors"] = result.get("errors", [])
                         result["errors"].append(f"Failed to extract {prop}: {e}")
         else:
-            # Single property mode - wrap in try/except to handle errors gracefully
+            # Single property mode
             prop = filters.get("property", "value")
             try:
                 values, sources = self._extract_values(resolved, filters, multiplier)
@@ -1093,7 +1455,6 @@ class TornadoProcessor:
                 if "errors" not in skip:
                     result["errors"] = result.get("errors", [])
                     result["errors"].append(f"Failed to extract {prop}: {e}")
-                # Return early with error if no data could be extracted
                 return result
         
         # If no properties were successfully extracted, return early
@@ -1161,43 +1522,122 @@ class TornadoProcessor:
         self,
         stats: Union[str, List[str]],
         parameters: Union[str, List[str]] = "all",
-        filters: Dict[str, Any] = None,
-        multiplier: float = 1.0,
+        filters: Union[Dict[str, Any], str] = None,
+        multiplier: float = None,
         options: Dict[str, Any] = None,
         case_selection: bool = False,
-        selection_criteria: Dict[str, Any] = None
+        selection_criteria: Dict[str, Any] = None,
+        include_base_case: bool = True,
+        include_reference_case: bool = True
     ) -> Union[Dict, List[Dict]]:
         """Compute statistics for multiple parameters.
-        
+
         Args:
             stats: Statistic(s) to compute
             parameters: Parameter name(s) or "all"
-            filters: Filters to apply
-            multiplier: Multiplier to apply
+            filters: Filters dict or stored filter name
+            multiplier: Override default multiplier
             options: Stats-specific options (see compute() docstring)
             case_selection: Whether to find closest matching cases
             selection_criteria: Criteria for selecting cases (see compute() docstring)
-        
+            include_base_case: If True, add base case values to results (default True)
+            include_reference_case: If True, add reference case values to results (default True)
+
         Returns:
             List of result dictionaries (or single dict if only one parameter)
+            
+        Examples:
+            # Compute for all parameters
+            results = processor.compute_batch('p90p10', filters='north_zones')
+            
+            # Compute for specific parameters
+            results = processor.compute_batch(
+                ['mean', 'p90p10'],
+                parameters=['param1', 'param2'],
+                filters={'property': 'stoiip'}
+            )
+            
+            # With custom multiplier
+            results = processor.compute_batch(
+                'mean',
+                filters='north_zones',
+                multiplier=1e-6
+            )
         """
+        # Resolve filter preset if string provided
+        filters = self._resolve_filter_preset(filters)
+
+        # Use default multiplier if not specified
+        if multiplier is None:
+            multiplier = self.default_multiplier
+            
         if parameters == "all":
             param_list = list(self.data.keys())
+            # Automatically skip base_case parameter when using "all"
+            if self.base_case_parameter and self.base_case_parameter in param_list:
+                param_list = [p for p in param_list if p != self.base_case_parameter]
         elif isinstance(parameters, str):
             param_list = [parameters]
         else:
             param_list = parameters
-        
+
         options = options or {}
         skip = options.get("skip", [])
         skip_parameters = options.get("skip_parameters", [])
         
-        # Filter out parameters in skip_parameters list (for backward compatibility, also check skip)
-        # Only filter if the skip item is actually a parameter name
+        # Filter out parameters in skip_parameters list
         all_param_names = set(self.data.keys())
         param_list = [p for p in param_list if p not in skip_parameters and p not in (skip if p in all_param_names else [])]
         
         results = []
+
+        # Add base/reference case as first entry if available
+        # Use the public API methods which properly handle filters and multipliers
+        if self.base_case_parameter and (include_base_case or include_reference_case):
+            case_entry = {"parameter": self.base_case_parameter}
+            
+            # Determine which property value to use
+            prop_to_use = None
+            if filters and "property" in filters:
+                prop_filter = filters["property"]
+                if isinstance(prop_filter, str):
+                    prop_to_use = prop_filter
+                elif isinstance(prop_filter, list) and len(prop_filter) > 0:
+                    prop_to_use = prop_filter[0]
+            
+            # Add base case value using public API
+            if include_base_case:
+                try:
+                    base_val = self.base_case(property=prop_to_use, filters=filters, multiplier=multiplier)
+                    if isinstance(base_val, dict):
+                        # Multiple properties - use first one
+                        case_entry["base_case"] = next(iter(base_val.values()))
+                    else:
+                        case_entry["base_case"] = base_val
+                except Exception as e:
+                    if "errors" not in skip:
+                        case_entry["errors"] = case_entry.get("errors", [])
+                        case_entry["errors"].append(f"Failed to extract base_case: {e}")
+            
+            # Add reference case value using public API
+            if include_reference_case:
+                try:
+                    ref_val = self.ref_case(property=prop_to_use, filters=filters, multiplier=multiplier)
+                    if isinstance(ref_val, dict):
+                        # Multiple properties - use first one
+                        case_entry["reference_case"] = next(iter(ref_val.values()))
+                    else:
+                        case_entry["reference_case"] = ref_val
+                except Exception as e:
+                    # Only report error if it's not about empty/missing reference case
+                    error_msg = str(e)
+                    if "errors" not in skip and "Available: []" not in error_msg:
+                        case_entry["errors"] = case_entry.get("errors", [])
+                        case_entry["errors"].append(f"Failed to extract reference_case: {e}")
+            
+            # Always add the entry (even if extraction failed, we'll show errors)
+            results.append(case_entry)
+
         for param in param_list:
             try:
                 result = self.compute(
@@ -1211,76 +1651,50 @@ class TornadoProcessor:
                 )
                 results.append(result)
             except Exception as e:
-                # Only add error results if "errors" not in skip
                 if "errors" not in skip:
                     result = {"parameter": param, "errors": [str(e)]}
                     results.append(result)
-        
+
         return results[0] if len(results) == 1 else results
     
-    def get_tornado_data(
+    # ================================================================
+    # PUBLIC API - CONVENIENCE METHODS
+    # ================================================================
+    
+    def distribution(
         self,
-        parameters: Union[str, List[str]] = "all",
-        filters: Dict[str, Any] = None,
-        multiplier: float = 1.0,
+        parameter: str = None,
+        filters: Union[Dict[str, Any], str] = None,
+        multiplier: float = None,
         options: Dict[str, Any] = None
-    ) -> Dict:
-        """Get tornado chart data formatted for easy plotting.
-        
-        Returns a dictionary with parameter names as keys and their p90p10 ranges,
-        plus a reference case value if available.
+    ) -> Union[np.ndarray, Dict[str, np.ndarray]]:
+        """Get full distribution of values (convenience method).
         
         Args:
-            parameters: Parameters to include (default "all")
-            filters: Filters to apply
-            multiplier: Multiplier to apply to values
-            options: Options including skip list, p90p10_threshold, etc.
+            parameter: Parameter name (defaults to first)
+            filters: Filters dict or stored filter name
+            multiplier: Override default multiplier
+            options: Options dict (decimals, skip, etc.)
             
         Returns:
-            Dictionary with structure:
-            {
-                'parameter_name': {
-                    'p10': value,
-                    'p90': value,
-                    'range': p90 - p10,
-                    'midpoint': (p90 + p10) / 2
-                },
-                ...
-            }
+            Array of values or dict of arrays (for multi-property)
+            
+        Examples:
+            # Get distribution with stored filter
+            values = processor.distribution(filters='my_zones')
+            
+            # Get distribution for specific property
+            values = processor.distribution(filters={'property': 'stoiip', 'zones': 'z1'})
+            
+            # With custom multiplier
+            values = processor.distribution(filters='my_zones', multiplier=1e-6)
         """
-        results = self.compute_batch(
-            stats='p90p10',
-            parameters=parameters,
+        result = self.compute(
+            stats="distribution",
+            parameter=parameter,
             filters=filters,
             multiplier=multiplier,
             options=options
         )
-        
-        if not isinstance(results, list):
-            results = [results]
-        
-        tornado_data = {}
-        
-        for result in results:
-            param = result.get("parameter")
-            if "p90p10" in result and "errors" not in result:
-                p10, p90 = result["p90p10"]
-                
-                # Handle multi-property case
-                if isinstance(p10, dict):
-                    # Use first property for tornado display
-                    first_prop = list(p10.keys())[0]
-                    p10_val = p10[first_prop]
-                    p90_val = p90[first_prop]
-                else:
-                    p10_val = p10
-                    p90_val = p90
-                
-                tornado_data[param] = {
-                    'p10': p10_val,
-                    'p90': p90_val,
-                    'range': p90_val - p10_val,
-                    'midpoint': (p90_val + p10_val) / 2
-                }
-        
-        return tornado_data
+
+        return result["distribution"]

@@ -10,7 +10,7 @@ def tornado_plot(
     title="Tornado Chart",
     subtitle=None,
     outfile=None,
-    base=0.0,
+    base=None,
     reference_case=None,
     unit=None,
     preferred_order=None,
@@ -28,7 +28,30 @@ def tornado_plot(
     - automatic space checking for p10/p90 labels (prefers largest space)
     - optional reference_case vertical line
     - preferred_order: list of parameter names to show first (in that order)
+    - auto-detects base and reference_case from sections if not provided
     """
+    # Auto-detect base and reference_case from sections
+    auto_base = None
+    auto_reference = None
+
+    for sec in sections:
+        if "base_case" in sec:
+            auto_base = sec.get("base_case")
+        if "reference_case" in sec:
+            auto_reference = sec.get("reference_case")
+        # Stop after finding the first entry with these values
+        if auto_base is not None or auto_reference is not None:
+            break
+
+    # Use auto-detected values if not explicitly provided
+    # Allow False to force defaults (0 for base, None for reference)
+    if base is None and auto_base is not None:
+        base = auto_base
+    elif base is None:
+        base = 0.0
+
+    if reference_case is None and auto_reference is not None:
+        reference_case = auto_reference
     # --- Default settings ---
     s = {
         "figsize": (10, 7),
@@ -87,6 +110,10 @@ def tornado_plot(
     # --- Prepare data ---
     data = []
     for sec in sections:
+        # Skip entries that only contain base_case/reference_case (no actual data)
+        if "minmax" not in sec and "range" not in sec:
+            continue
+
         if "minmax" in sec:
             low, high = sec["minmax"]
         elif "range" in sec:

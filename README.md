@@ -8,9 +8,13 @@ A Python library for tornado chart generation and analysis. TornadoPy provides t
   - Parse multi-sheet Excel files with complex headers
   - Extract and compute statistics (p90p10, mean, median, minmax, percentiles)
   - Filter data by properties and dynamic fields
+  - Named filter presets for reusable filter combinations
+  - Base and reference case extraction with caching
+  - Default multiplier support for consistent unit conversion
   - Case selection with weighted criteria
   - Batch processing for multiple parameters
   - Optimized for performance with native numpy operations
+  - Comprehensive docstrings and organized code structure
 
 - **tornado_plot**: Generate professional tornado charts
   - Customizable colors, fonts, and styling
@@ -43,14 +47,19 @@ pip install tornadopy
 from tornadopy import TornadoProcessor
 
 # Load Excel file with tornado data
-processor = TornadoProcessor("tornado_data.xlsb")
+# Optional: Set default multiplier and base case sheet
+processor = TornadoProcessor(
+    "tornado_data.xlsb",
+    multiplier=1e-6,  # Default multiplier for all operations
+    base_case="Reference_Case"  # Sheet containing base/reference cases
+)
 
 # Get available parameters
-parameters = processor.get_parameters()
+parameters = processor.parameters()
 print(f"Parameters: {parameters}")
 
 # Get properties for a parameter
-properties = processor.get_properties(parameter="Parameter1")
+properties = processor.properties(parameter="Parameter1")
 print(f"Properties: {properties}")
 
 # Compute statistics
@@ -58,7 +67,7 @@ result = processor.compute(
     stats="p90p10",
     parameter="Parameter1",
     filters={"property": "npv"},
-    multiplier=1e-6  # Convert to millions
+    multiplier=1e-6  # Convert to millions (or use default if set)
 )
 print(f"P90/P10: {result['p90p10']}")
 ```
@@ -103,7 +112,7 @@ from tornadopy import TornadoProcessor, distribution_plot
 
 # Get distribution data
 processor = TornadoProcessor("tornado_data.xlsb")
-distribution = processor.get_distribution(
+distribution = processor.distribution(
     parameter="Parameter1",
     filters={"property": "npv"},
     multiplier=1e-6
@@ -178,7 +187,7 @@ from tornadopy import TornadoProcessor, distribution_plot
 processor = TornadoProcessor("reservoir_data.xlsb")
 
 # Get distribution data for specific zones
-distribution = processor.get_distribution(
+distribution = processor.distribution(
     parameter="Uncertainty_Analysis",
     filters={
         "zones": ["Zone A - Reservoir", "Zone B - Reservoir"],
@@ -360,7 +369,7 @@ fig1, ax1, saved1 = tornado_plot(
 )
 
 # 2. Generate Distribution Chart
-distribution = processor.get_distribution(
+distribution = processor.distribution(
     parameter="Full_Uncertainty",
     filters={
         "zones": zones,
@@ -411,7 +420,7 @@ scenarios = [
 fig, axes = plt.subplots(1, 3, figsize=(18, 6))
 
 for idx, scenario in enumerate(scenarios):
-    dist = processor.get_distribution(
+    dist = processor.distribution(
         parameter=scenario["param"],
         filters={"property": "NPV"},
         multiplier=1e-6
@@ -435,6 +444,100 @@ plt.show()
 ```
 
 ## Tips and Best Practices
+
+### Filter Management (NEW)
+
+Store and reuse filter presets for consistent analysis:
+
+```python
+from tornadopy import TornadoProcessor
+
+processor = TornadoProcessor("reservoir_data.xlsb")
+
+# Store commonly used filter combinations
+processor.set_filter('main_zones', {
+    'zones': ['Main Reservoir - SST1', 'Main Reservoir - SST2'],
+    'property': 'STOIIP'
+})
+
+processor.set_filter('north_area', {
+    'zones': ['North Zone A', 'North Zone B'],
+})
+
+# List all stored filters
+print(f"Available filters: {processor.list_filters()}")
+
+# Use stored filters by name (can be string or dict)
+result = processor.compute(
+    stats="p90p10",
+    parameter="Uncertainty_Analysis",
+    filters="main_zones",  # Reference filter by name
+    multiplier=1e-3
+)
+
+# Retrieve filter for inspection
+main_zones_filter = processor.get_filter('main_zones')
+print(f"Filter contents: {main_zones_filter}")
+
+# Can still use dict filters as before
+result = processor.compute(
+    stats="mean",
+    parameter="Porosity",
+    filters={'zones': ['Zone A'], 'property': 'STOIIP'},
+    multiplier=1e-3
+)
+```
+
+### Base and Reference Case Extraction (NEW)
+
+Extract base and reference case values when initializing with a base case sheet:
+
+```python
+from tornadopy import TornadoProcessor
+
+# Initialize with base case parameter
+processor = TornadoProcessor(
+    "reservoir_data.xlsb",
+    multiplier=1e-3,
+    base_case="Reference_Case"  # Sheet containing base (idx 0) and reference (idx 1)
+)
+
+# Access cached base case values (extracted at initialization)
+base_values = processor.base_case_values
+print(f"Base case STOIIP: {base_values.get('STOIIP', 'N/A')}")
+
+# Access cached reference case values
+ref_values = processor.reference_case_values
+print(f"Reference case STOIIP: {ref_values.get('STOIIP', 'N/A')}")
+
+# Extract with custom filters and multiplier at runtime
+base_case_custom = processor.base_case(
+    parameter="Reference_Case",
+    filters={'zones': ['Main Reservoir']},
+    multiplier=1e-6  # Different multiplier than default
+)
+
+ref_case_custom = processor.ref_case(
+    parameter="Reference_Case",
+    filters={'zones': ['Main Reservoir']},
+    multiplier=1e-6
+)
+
+# Use in tornado plot
+from tornadopy import tornado_plot
+
+base_stoiip = base_values.get('STOIIP', 14.5)
+ref_stoiip = ref_values.get('STOIIP', 14.2)
+
+fig, ax, saved = tornado_plot(
+    sections=tornado_sections,
+    title="STOIIP Tornado Analysis",
+    base=base_stoiip,
+    reference_case=ref_stoiip,
+    unit="MM m³",
+    outfile="tornado.png"
+)
+```
 
 ### Working with Filters
 
@@ -549,16 +652,56 @@ Case            | Property 1      | Property 2      | ...
 
 ### TornadoProcessor
 
-#### Methods
+#### Initialization
 
-- `get_parameters()`: Get list of available parameters (sheet names)
-- `get_properties(parameter)`: Get available properties for a parameter
-- `get_unique(field, parameter)`: Get unique values for a dynamic field
-- `get_info(parameter)`: Get metadata for a parameter
-- `get_case(index, parameter)`: Get data for a specific case
-- `compute(stats, parameter, filters, multiplier, options, case_selection, selection_criteria)`: Compute statistics
-- `compute_batch(...)`: Batch compute for multiple parameters
-- `get_tornado_data(...)`: Get tornado chart formatted data
+```python
+TornadoProcessor(
+    filepath: str,
+    multiplier: float = 1.0,
+    base_case: str = None
+)
+```
+
+**Parameters:**
+- `filepath`: Path to Excel file (.xlsx, .xlsb, etc.)
+- `multiplier`: Default multiplier to apply to all operations (default: 1.0)
+- `base_case`: Name of sheet containing base/reference case data (optional)
+
+#### Core Methods
+
+**Information Access:**
+- `parameters()`: Get list of available parameters (sheet names)
+- `properties(parameter=None)`: Get available properties for a parameter
+- `unique(field, parameter=None)`: Get unique values for a dynamic field
+- `info(parameter=None)`: Get metadata for a parameter
+- `case(index, parameter=None)`: Get data for a specific case
+
+**Statistics:**
+- `compute(stats, parameter=None, filters=None, multiplier=None, options=None, case_selection=False, selection_criteria=None)`: Compute statistics
+- `compute_batch(stats, parameters, filters=None, multiplier=None, options=None, case_selection=False, selection_criteria=None)`: Batch compute for multiple parameters
+- `distribution(parameter=None, filters=None, multiplier=None, options=None)`: Get distribution data
+- `get_tornado_data(parameters, filters=None, multiplier=None, options=None)`: Get tornado chart formatted data
+
+**Filter Management (NEW):**
+- `set_filter(name, filters)`: Store a named filter preset
+- `get_filter(name)`: Retrieve a stored filter preset
+- `list_filters()`: List all stored filter names
+
+**Base/Reference Case (NEW):**
+- `base_case(parameter=None, filters=None, multiplier=None)`: Extract base case values (index 0)
+- `ref_case(parameter=None, filters=None, multiplier=None)`: Extract reference case values (index 1)
+- `base_case_values`: Property containing cached base case values (dict)
+- `reference_case_values`: Property containing cached reference case values (dict)
+
+#### Legacy Methods (Deprecated but still supported)
+
+For backwards compatibility, the following methods still work but are deprecated:
+- `get_parameters()` → use `parameters()`
+- `get_properties()` → use `properties()`
+- `get_unique()` → use `unique()`
+- `get_distribution()` → use `distribution()`
+- `get_info()` → use `info()`
+- `get_case()` → use `case()`
 
 ### tornado_plot
 
