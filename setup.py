@@ -5,7 +5,7 @@ with open("README.md", "r", encoding="utf-8") as fh:
 
 setup(
     name="tornadopy",
-    version="0.1.6",
+    version="0.1.8",
     author="Kristian dF Kollsgård",
     author_email="kkollsg@gmail.com",
     description="A Python library for tornado chart generation and analysis",
