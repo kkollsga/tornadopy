@@ -1728,6 +1728,73 @@ class TornadoProcessor:
     # PUBLIC API - CONVENIENCE METHODS
     # ================================================================
     
+    def tornado(
+        self,
+        parameters: Union[str, List[str]] = "all",
+        filters: Union[Dict[str, Any], str] = None,
+        multiplier: float = None,
+        options: Dict[str, Any] = None,
+        case_selection: bool = False,
+        selection_criteria: Dict[str, Any] = None,
+        include_base_case: bool = True,
+        include_reference_case: bool = True,
+        sort_by_range: bool = True
+    ) -> Union[Dict, List[Dict]]:
+        """Compute tornado chart statistics (minmax and p90p10) for multiple parameters.
+        
+        This is a convenience wrapper around compute_batch() with stats=['minmax', 'p90p10']
+        predefined. Perfect for quickly generating tornado chart data.
+        
+        Args:
+            parameters: Parameter name(s) or "all"
+            filters: Filters dict or stored filter name
+            multiplier: Override default multiplier
+            options: Stats-specific options (see compute() docstring)
+            case_selection: Whether to find closest matching cases
+            selection_criteria: Criteria for selecting cases
+            include_base_case: Include base case values (default True)
+            include_reference_case: Include reference case values (default True)
+            sort_by_range: Sort by range (default True)
+            
+        Returns:
+            List of result dictionaries with minmax and p90p10 statistics
+            
+        Examples:
+            # Simple tornado chart data
+            results = processor.tornado(filters={'property': 'stoiip'})
+            
+            # With custom multiplier and filters
+            results = processor.tornado(
+                filters='north_zones',
+                multiplier=1e-6
+            )
+            
+            # Specific parameters only
+            results = processor.tornado(
+                parameters=['NTG', 'FWL', 'GOC'],
+                filters={'property': 'stoiip'}
+            )
+            
+            # With case selection
+            results = processor.tornado(
+                filters={'property': 'stoiip'},
+                case_selection=True,
+                selection_criteria={'weights': {'stoiip': 0.6, 'giip': 0.4}}
+            )
+        """
+        return self.compute_batch(
+            stats=['minmax', 'p90p10'],
+            parameters=parameters,
+            filters=filters,
+            multiplier=multiplier,
+            options=options,
+            case_selection=case_selection,
+            selection_criteria=selection_criteria,
+            include_base_case=include_base_case,
+            include_reference_case=include_reference_case,
+            sort_by_range=sort_by_range
+        )
+    
     def distribution(
         self,
         parameter: str = None,
@@ -1765,79 +1832,3 @@ class TornadoProcessor:
         )
 
         return result["distribution"]
-    
-    def tornado_data(
-        self,
-        parameters: Union[str, List[str]] = "all",
-        filters: Union[Dict[str, Any], str] = None,
-        multiplier: float = None,
-        options: Dict[str, Any] = None
-    ) -> Dict:
-        """Get tornado chart data (p90p10 ranges) formatted for easy plotting.
-
-        Returns a dictionary with parameter names as keys and their p90p10 ranges.
-
-        Args:
-            parameters: Parameters to include (default "all")
-            filters: Filters dict or stored filter name
-            multiplier: Override default multiplier
-            options: Options including skip list, p90p10_threshold (default 10), etc.
-
-        Returns:
-            Dictionary with structure:
-            {
-                'parameter_name': {
-                    'p10': value,
-                    'p90': value,
-                    'range': p90 - p10,
-                    'midpoint': (p90 + p10) / 2
-                },
-                ...
-            }
-            
-        Examples:
-            # Get tornado data for all parameters
-            data = processor.tornado_data(filters='my_zones')
-            
-            # Get tornado data with custom multiplier
-            data = processor.tornado_data(
-                filters={'property': 'stoiip'},
-                multiplier=1e-6
-            )
-        """
-        results = self.compute_batch(
-            stats='p90p10',
-            parameters=parameters,
-            filters=filters,
-            multiplier=multiplier,
-            options=options
-        )
-        
-        if not isinstance(results, list):
-            results = [results]
-        
-        tornado_data = {}
-        
-        for result in results:
-            param = result.get("parameter")
-            if "p90p10" in result and "errors" not in result:
-                p10, p90 = result["p90p10"]
-                
-                # Handle multi-property case
-                if isinstance(p10, dict):
-                    # Use first property for tornado display
-                    first_prop = list(p10.keys())[0]
-                    p10_val = p10[first_prop]
-                    p90_val = p90[first_prop]
-                else:
-                    p10_val = p10
-                    p90_val = p90
-                
-                tornado_data[param] = {
-                    'p10': p10_val,
-                    'p90': p90_val,
-                    'range': p90_val - p10_val,
-                    'midpoint': (p90_val + p10_val) / 2
-                }
-        
-        return tornado_data
