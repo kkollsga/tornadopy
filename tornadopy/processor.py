@@ -1528,7 +1528,8 @@ class TornadoProcessor:
         case_selection: bool = False,
         selection_criteria: Dict[str, Any] = None,
         include_base_case: bool = True,
-        include_reference_case: bool = True
+        include_reference_case: bool = True,
+        sort_by_range: bool = True
     ) -> Union[Dict, List[Dict]]:
         """Compute statistics for multiple parameters.
 
@@ -1542,9 +1543,17 @@ class TornadoProcessor:
             selection_criteria: Criteria for selecting cases (see compute() docstring)
             include_base_case: If True, add base case values to results (default True)
             include_reference_case: If True, add reference case values to results (default True)
+            sort_by_range: If True, sort by p90p10 or minmax range (default True)
 
         Returns:
             List of result dictionaries (or single dict if only one parameter)
+            
+        Notes:
+            When sort_by_range=True (default):
+            - Reference case always appears first
+            - Parameters sorted by p90-p10 delta (descending)
+            - Parameters without p90p10 use minmax delta
+            - Parameters without either appear last in original order
             
         Examples:
             # Compute for all parameters
@@ -1562,6 +1571,13 @@ class TornadoProcessor:
                 'mean',
                 filters='north_zones',
                 multiplier=1e-6
+            )
+            
+            # Disable sorting
+            results = processor.compute_batch(
+                'p90p10',
+                filters='north_zones',
+                sort_by_range=False
             )
         """
         # Resolve filter preset if string provided
@@ -1655,6 +1671,57 @@ class TornadoProcessor:
                     result = {"parameter": param, "errors": [str(e)]}
                     results.append(result)
 
+        # Sort results by range if requested
+        if sort_by_range and len(results) > 1:
+            # Separate ref_case entry (always first) from other results
+            ref_case_entry = None
+            other_results = []
+            
+            for result in results:
+                param_name = result.get("parameter", "")
+                if param_name == self.base_case_parameter:
+                    ref_case_entry = result
+                else:
+                    other_results.append(result)
+            
+            # Calculate sort key for each result
+            def get_sort_key(result):
+                # Try p90p10 first (preferred)
+                if "p90p10" in result and "errors" not in result:
+                    p90p10 = result["p90p10"]
+                    if isinstance(p90p10, list) and len(p90p10) == 2:
+                        # Single property: [p10, p90]
+                        return p90p10[1] - p90p10[0]
+                    elif isinstance(p90p10, list) and len(p90p10) == 2 and isinstance(p90p10[0], dict):
+                        # Multi-property: [{prop: p10_val}, {prop: p90_val}]
+                        # Use first property's range
+                        first_prop = list(p90p10[0].keys())[0]
+                        return p90p10[1][first_prop] - p90p10[0][first_prop]
+                
+                # Fall back to minmax
+                if "minmax" in result:
+                    minmax = result["minmax"]
+                    if isinstance(minmax, list) and len(minmax) == 2:
+                        # Single property: [min, max]
+                        return minmax[1] - minmax[0]
+                    elif isinstance(minmax, list) and len(minmax) == 2 and isinstance(minmax[0], dict):
+                        # Multi-property: [{prop: min_val}, {prop: max_val}]
+                        # Use first property's range
+                        first_prop = list(minmax[0].keys())[0]
+                        return minmax[1][first_prop] - minmax[0][first_prop]
+                
+                # No sortable stat - use very small number to keep at end
+                return -float('inf')
+            
+            # Sort by range (descending - largest range first)
+            other_results.sort(key=get_sort_key, reverse=True)
+            
+            # Reconstruct results list with ref_case first
+            results = []
+            if ref_case_entry:
+                results.append(ref_case_entry)
+            results.extend(other_results)
+
         return results[0] if len(results) == 1 else results
     
     # ================================================================
@@ -1698,3 +1765,79 @@ class TornadoProcessor:
         )
 
         return result["distribution"]
+    
+    def tornado_data(
+        self,
+        parameters: Union[str, List[str]] = "all",
+        filters: Union[Dict[str, Any], str] = None,
+        multiplier: float = None,
+        options: Dict[str, Any] = None
+    ) -> Dict:
+        """Get tornado chart data (p90p10 ranges) formatted for easy plotting.
+
+        Returns a dictionary with parameter names as keys and their p90p10 ranges.
+
+        Args:
+            parameters: Parameters to include (default "all")
+            filters: Filters dict or stored filter name
+            multiplier: Override default multiplier
+            options: Options including skip list, p90p10_threshold (default 10), etc.
+
+        Returns:
+            Dictionary with structure:
+            {
+                'parameter_name': {
+                    'p10': value,
+                    'p90': value,
+                    'range': p90 - p10,
+                    'midpoint': (p90 + p10) / 2
+                },
+                ...
+            }
+            
+        Examples:
+            # Get tornado data for all parameters
+            data = processor.tornado_data(filters='my_zones')
+            
+            # Get tornado data with custom multiplier
+            data = processor.tornado_data(
+                filters={'property': 'stoiip'},
+                multiplier=1e-6
+            )
+        """
+        results = self.compute_batch(
+            stats='p90p10',
+            parameters=parameters,
+            filters=filters,
+            multiplier=multiplier,
+            options=options
+        )
+        
+        if not isinstance(results, list):
+            results = [results]
+        
+        tornado_data = {}
+        
+        for result in results:
+            param = result.get("parameter")
+            if "p90p10" in result and "errors" not in result:
+                p10, p90 = result["p90p10"]
+                
+                # Handle multi-property case
+                if isinstance(p10, dict):
+                    # Use first property for tornado display
+                    first_prop = list(p10.keys())[0]
+                    p10_val = p10[first_prop]
+                    p90_val = p90[first_prop]
+                else:
+                    p10_val = p10
+                    p90_val = p90
+                
+                tornado_data[param] = {
+                    'p10': p10_val,
+                    'p90': p90_val,
+                    'range': p90_val - p10_val,
+                    'midpoint': (p90_val + p10_val) / 2
+                }
+        
+        return tornado_data
