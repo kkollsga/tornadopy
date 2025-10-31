@@ -1730,9 +1730,9 @@ class TornadoProcessor:
     
     def tornado(
         self,
-        parameters: Union[str, List[str]] = "all",
         filters: Union[Dict[str, Any], str] = None,
         multiplier: float = None,
+        skip: Union[str, List[str]] = None,
         options: Dict[str, Any] = None,
         case_selection: bool = False,
         selection_criteria: Dict[str, Any] = None,
@@ -1740,16 +1740,16 @@ class TornadoProcessor:
         include_reference_case: bool = True,
         sort_by_range: bool = True
     ) -> Union[Dict, List[Dict]]:
-        """Compute tornado chart statistics (minmax and p90p10) for multiple parameters.
+        """Compute tornado chart statistics (minmax and p90p10) for all parameters.
         
         This is a convenience wrapper around compute_batch() with stats=['minmax', 'p90p10']
-        predefined. Perfect for quickly generating tornado chart data.
+        and parameters="all" predefined. Perfect for quickly generating tornado chart data.
         
         Args:
-            parameters: Parameter name(s) or "all"
             filters: Filters dict or stored filter name
             multiplier: Override default multiplier
-            options: Stats-specific options (see compute() docstring)
+            skip: Single field or list of fields to skip in output (e.g., 'sources' or ['sources', 'errors'])
+            options: Additional stats-specific options (merged with skip)
             case_selection: Whether to find closest matching cases
             selection_criteria: Criteria for selecting cases
             include_base_case: Include base case values (default True)
@@ -1757,37 +1757,67 @@ class TornadoProcessor:
             sort_by_range: Sort by range (default True)
             
         Returns:
-            List of result dictionaries with minmax and p90p10 statistics
+            List of result dictionaries with minmax and p90p10 statistics for all parameters
             
         Examples:
             # Simple tornado chart data
             results = processor.tornado(filters={'property': 'stoiip'})
             
+            # Skip sources in output
+            results = processor.tornado(
+                filters={'property': 'stoiip'},
+                skip='sources'
+            )
+            
+            # Skip multiple fields
+            results = processor.tornado(
+                filters={'property': 'stoiip'},
+                skip=['sources', 'errors']
+            )
+            
             # With custom multiplier and filters
             results = processor.tornado(
                 filters='north_zones',
-                multiplier=1e-6
-            )
-            
-            # Specific parameters only
-            results = processor.tornado(
-                parameters=['NTG', 'FWL', 'GOC'],
-                filters={'property': 'stoiip'}
+                multiplier=1e-6,
+                skip='sources'
             )
             
             # With case selection
             results = processor.tornado(
                 filters={'property': 'stoiip'},
                 case_selection=True,
-                selection_criteria={'weights': {'stoiip': 0.6, 'giip': 0.4}}
+                selection_criteria={'weights': {'stoiip': 0.6, 'giip': 0.4}},
+                skip=['sources', 'closest_case']
+            )
+            
+            # With additional options
+            results = processor.tornado(
+                filters={'property': 'stoiip'},
+                skip='sources',
+                options={'p90p10_threshold': 150, 'decimals': 2}
             )
         """
+        # Merge skip into options
+        merged_options = options.copy() if options else {}
+        
+        if skip is not None:
+            # Convert string to list if needed
+            skip_list = [skip] if isinstance(skip, str) else skip
+            
+            # Merge with existing skip in options if present
+            existing_skip = merged_options.get('skip', [])
+            if isinstance(existing_skip, str):
+                existing_skip = [existing_skip]
+            
+            # Combine and deduplicate
+            merged_options['skip'] = list(set(existing_skip + skip_list))
+        
         return self.compute_batch(
             stats=['minmax', 'p90p10'],
-            parameters=parameters,
+            parameters="all",
             filters=filters,
             multiplier=multiplier,
-            options=options,
+            options=merged_options,
             case_selection=case_selection,
             selection_criteria=selection_criteria,
             include_base_case=include_base_case,
