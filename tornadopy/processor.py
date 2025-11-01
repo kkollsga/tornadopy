@@ -710,409 +710,295 @@ class TornadoProcessor:
         return details
     
     # ================================================================
-    # STATISTICS COMPUTATION
+    # STATISTICS COMPUTATION - EFFICIENT ENGINE
     # ================================================================
     
-    def _compute_p90p10(
+    def _compute_all_stats(
         self,
         property_values: Dict[str, np.ndarray],
+        stats: List[str],
+        options: Dict[str, Any],
+        decimals: int,
+        skip: List[str]
+    ) -> Dict:
+        """Compute all requested statistics efficiently in a single pass.
+        
+        This replaces individual _compute_mean(), _compute_median(), etc. methods
+        with a single efficient implementation that processes all stats at once.
+        
+        Args:
+            property_values: Dict of property name to array of values
+            stats: List of statistics to compute
+            options: Options dict (p90p10_threshold, p for percentile, etc.)
+            decimals: Number of decimal places
+            skip: List of fields to skip in output
+            
+        Returns:
+            Dict with computed statistics
+        """
+        result = {}
+        _round = lambda x: round(x, decimals)
+        threshold = options.get("p90p10_threshold", 10)
+        
+        # For single property, we'll store results directly
+        # For multi-property, we'll group by stat type
+        is_multi_property = len(property_values) > 1
+        
+        # Collect all stat values per property
+        all_prop_stats = {}
+        
+        for prop, values in property_values.items():
+            prop_stats = {}
+            
+            for stat in stats:
+                try:
+                    if stat == 'mean':
+                        prop_stats['mean'] = _round(float(np.mean(values)))
+                    
+                    elif stat == 'median':
+                        prop_stats['median'] = _round(float(np.median(values)))
+                    
+                    elif stat == 'std':
+                        prop_stats['std'] = _round(float(np.std(values)))
+                    
+                    elif stat == 'cv':
+                        mean_val = np.mean(values)
+                        if abs(mean_val) > 1e-10:  # Avoid division by zero
+                            prop_stats['cv'] = _round(float(np.std(values) / mean_val))
+                        else:
+                            prop_stats['cv'] = None
+                    
+                    elif stat == 'count':
+                        prop_stats['count'] = len(values)
+                    
+                    elif stat == 'sum':
+                        prop_stats['sum'] = _round(float(np.sum(values)))
+                    
+                    elif stat == 'variance':
+                        prop_stats['variance'] = _round(float(np.var(values)))
+                    
+                    elif stat == 'range':
+                        prop_stats['range'] = _round(float(np.max(values) - np.min(values)))
+                    
+                    elif stat == 'minmax':
+                        min_val = _round(float(np.min(values)))
+                        max_val = _round(float(np.max(values)))
+                        prop_stats['minmax'] = [min_val, max_val]
+                    
+                    elif stat == 'p90p10':
+                        if threshold and len(values) < threshold:
+                            if "errors" not in skip:
+                                result.setdefault("errors", []).append(
+                                    f"Too few cases ({len(values)}) for {prop} p90p10; threshold={threshold}"
+                                )
+                        else:
+                            p10, p90 = np.percentile(values, [10, 90])
+                            prop_stats['p90p10'] = [_round(float(p10)), _round(float(p90))]
+                    
+                    elif stat == 'p1p99':
+                        p1, p99 = np.percentile(values, [1, 99])
+                        prop_stats['p1p99'] = [_round(float(p1)), _round(float(p99))]
+                    
+                    elif stat == 'p25p75':
+                        p25, p75 = np.percentile(values, [25, 75])
+                        prop_stats['p25p75'] = [_round(float(p25)), _round(float(p75))]
+                    
+                    elif stat == 'percentile':
+                        p = options.get('p', 50)
+                        perc_val = np.percentile(values, p)
+                        prop_stats[f'p{p}'] = _round(float(perc_val))
+                    
+                    elif stat == 'distribution':
+                        prop_stats['distribution'] = np.round(values, decimals)
+                    
+                    else:
+                        raise ValueError(
+                            f"Unknown stat '{stat}'. Valid: "
+                            "['p90p10', 'mean', 'median', 'minmax', 'percentile', 'distribution', "
+                            "'std', 'cv', 'count', 'sum', 'variance', 'range', 'p1p99', 'p25p75']"
+                        )
+                
+                except Exception as e:
+                    if "errors" not in skip:
+                        result.setdefault("errors", []).append(f"Failed to compute {stat} for {prop}: {e}")
+            
+            all_prop_stats[prop] = prop_stats
+        
+        # Format results based on single vs multi-property
+        if is_multi_property:
+            # Group by stat type: {stat_name: {prop1: val1, prop2: val2}}
+            for stat in stats:
+                if stat == 'distribution':
+                    # Distribution stays as dict of arrays
+                    result['distribution'] = {prop: all_prop_stats[prop].get('distribution') 
+                                             for prop in property_values.keys() 
+                                             if 'distribution' in all_prop_stats[prop]}
+                elif stat in ['minmax', 'p90p10', 'p1p99', 'p25p75']:
+                    # Convert to [dict_low, dict_high] format
+                    stat_dict = {prop: all_prop_stats[prop].get(stat) 
+                                for prop in property_values.keys() 
+                                if stat in all_prop_stats[prop]}
+                    if stat_dict:
+                        result[stat] = [
+                            {prop: val[0] for prop, val in stat_dict.items()},
+                            {prop: val[1] for prop, val in stat_dict.items()}
+                        ]
+                else:
+                    # Single value stats: {prop1: val1, prop2: val2}
+                    stat_dict = {prop: all_prop_stats[prop].get(stat) 
+                                for prop in property_values.keys() 
+                                if stat in all_prop_stats[prop]}
+                    if stat_dict:
+                        result[stat] = stat_dict
+        else:
+            # Single property: flatten results
+            prop = list(property_values.keys())[0]
+            result.update(all_prop_stats[prop])
+        
+        return result
+    
+    def _perform_case_selection(
+        self,
+        property_values: Dict[str, np.ndarray],
+        stats: List[str],
+        stats_result: Dict,
+        selection_criteria: Dict[str, Any],
         resolved: str,
         filters: Dict[str, Any],
         multiplier: float,
-        options: Dict[str, Any],
-        case_selection: bool,
-        selection_criteria: Dict[str, Any],
         skip: List[str],
-        decimals: int,
-        _round
-    ) -> Dict:
-        """Compute p10 and p90 percentiles with optional case selection."""
-        result = {}
-        threshold = options.get("p90p10_threshold", 10)
+        decimals: int
+    ) -> List[Dict]:
+        """Perform case selection for computed statistics.
         
-        # Calculate percentiles for each property in property_values
-        p10_dict = {}
-        p90_dict = {}
-        
-        for prop, prop_vals in property_values.items():
-            if threshold and len(prop_vals) < threshold:
-                if "errors" not in skip:
-                    result["errors"] = result.get("errors", [])
-                    result["errors"].append(
-                        f"Too few cases ({len(prop_vals)}) for {prop} p90p10; threshold={threshold}"
-                    )
-            else:
-                p10_val, p90_val = np.percentile(prop_vals, [10, 90])
-                p10_dict[prop] = _round(float(p10_val))
-                p90_dict[prop] = _round(float(p90_val))
-        
-        if not p10_dict or not p90_dict:
-            return result
-        
-        # Format result based on single vs multi-property
-        if len(property_values) == 1:
-            prop = list(property_values.keys())[0]
-            result["p90p10"] = [p10_dict[prop], p90_dict[prop]]
-        else:
-            result["p90p10"] = [p10_dict, p90_dict]
-        
-        # Handle case selection
-        if case_selection and "closest_case" not in skip:
-            combinations = selection_criteria.get("combinations")
+        Args:
+            property_values: Dict of property arrays
+            stats: List of computed stats
+            stats_result: Results from _compute_all_stats
+            selection_criteria: Criteria with weights or combinations
+            resolved: Parameter name
+            filters: Applied filters
+            multiplier: Applied multiplier
+            skip: Skip list
+            decimals: Decimal places
             
-            if combinations:
-                # Use weighted combinations approach
-                closest_cases = []
-                
+        Returns:
+            List of closest case details
+        """
+        _round = lambda x: round(x, decimals)
+        closest_cases = []
+        
+        # Check if using combinations (complex) or simple weights
+        combinations = selection_criteria.get("combinations")
+        
+        if combinations:
+            # Handle weighted combinations for p90p10 only
+            if 'p90p10' in stats:
                 # Calculate distances for p10 and p90
-                distances_p10, metadata_p10 = self._calculate_multi_combination_distance(
+                distances_p10, _ = self._calculate_multi_combination_distance(
                     combinations, resolved, filters, multiplier, "p10", skip
                 )
-                distances_p90, metadata_p90 = self._calculate_multi_combination_distance(
+                distances_p90, _ = self._calculate_multi_combination_distance(
                     combinations, resolved, filters, multiplier, "p90", skip
                 )
                 
-                idx_p10 = np.argmin(distances_p10)
-                idx_p90 = np.argmin(distances_p90)
-                
-                # Get case details
+                if distances_p10 is not None and distances_p90 is not None:
+                    first_prop = list(property_values.keys())[0]
+                    
+                    # P10 case
+                    idx_p10 = np.argmin(distances_p10)
+                    case_p10 = self._get_case_details(
+                        int(idx_p10), resolved, filters, multiplier,
+                        property_values[first_prop][idx_p10], decimals
+                    )
+                    case_p10["case"] = "p10"
+                    case_p10["selection_method"] = "weighted_combinations"
+                    case_p10["weighted_distance"] = _round(distances_p10[idx_p10])
+                    closest_cases.append(case_p10)
+                    
+                    # P90 case
+                    idx_p90 = np.argmin(distances_p90)
+                    case_p90 = self._get_case_details(
+                        int(idx_p90), resolved, filters, multiplier,
+                        property_values[first_prop][idx_p90], decimals
+                    )
+                    case_p90["case"] = "p90"
+                    case_p90["selection_method"] = "weighted_combinations"
+                    case_p90["weighted_distance"] = _round(distances_p90[idx_p90])
+                    closest_cases.append(case_p90)
+            
+            return closest_cases
+        
+        # Simple weights-based selection
+        weighted_property_values, weights, errors = self._prepare_weighted_case_selection(
+            property_values, selection_criteria, resolved, filters, multiplier, skip
+        )
+        
+        if not weighted_property_values:
+            return []
+        
+        # Build targets dict for each stat that supports case selection
+        targets = {}
+        
+        for stat in stats:
+            if stat == 'minmax':
+                # Minmax uses exact matching
                 first_prop = list(property_values.keys())[0]
-                case_p10 = self._get_case_details(
-                    int(idx_p10), resolved, filters, multiplier,
-                    property_values[first_prop][idx_p10], decimals
-                )
-                case_p10["case"] = "p10"
-                case_p10["selection_method"] = "weighted_combinations"
-                case_p10["weighted_distance"] = _round(distances_p10[idx_p10])
                 
-                # Add selection_values as a list corresponding to combinations
-                selection_values_list = []
-                for combo in combinations:
-                    combo_filters = combo.get("filters", {})
-                    property_weights = combo.get("properties", {})
-                    merged_filters = {**{k: v for k, v in filters.items() if k != "property"}, **combo_filters}
+                # Min case
+                idx_min = np.argmin(property_values[first_prop])
+                case_min = self._get_case_details(
+                    int(idx_min), resolved, filters, multiplier,
+                    property_values[first_prop][idx_min], decimals
+                )
+                case_min["case"] = "min"
+                case_min["selection_method"] = "exact"
+                closest_cases.append(case_min)
+                
+                # Max case
+                idx_max = np.argmax(property_values[first_prop])
+                case_max = self._get_case_details(
+                    int(idx_max), resolved, filters, multiplier,
+                    property_values[first_prop][idx_max], decimals
+                )
+                case_max["case"] = "max"
+                case_max["selection_method"] = "exact"
+                closest_cases.append(case_max)
+            
+            elif stat in ['mean', 'median', 'p90p10']:
+                # Extract target values from stats_result
+                if stat in stats_result:
+                    stat_value = stats_result[stat]
                     
-                    combo_values = {}
-                    for prop in property_weights.keys():
-                        try:
-                            prop_filters = {**merged_filters, "property": prop}
-                            prop_vals, _ = self._extract_values(resolved, prop_filters, multiplier)
-                            if idx_p10 < len(prop_vals):
-                                # Add actual case value
-                                combo_values[prop] = _round(prop_vals[idx_p10])
-                                # Add target p10 value
-                                p10_target = np.percentile(prop_vals, 10)
-                                combo_values[f"p10_{prop}"] = _round(p10_target)
-                        except:
-                            pass
-                    selection_values_list.append(combo_values)
-                
-                case_p10["selection_values"] = selection_values_list
-                closest_cases.append(case_p10)
-                
-                case_p90 = self._get_case_details(
-                    int(idx_p90), resolved, filters, multiplier,
-                    property_values[first_prop][idx_p90], decimals
-                )
-                case_p90["case"] = "p90"
-                case_p90["selection_method"] = "weighted_combinations"
-                case_p90["weighted_distance"] = _round(distances_p90[idx_p90])
-                
-                # Add selection_values as a list corresponding to combinations
-                selection_values_list = []
-                for combo in combinations:
-                    combo_filters = combo.get("filters", {})
-                    property_weights = combo.get("properties", {})
-                    merged_filters = {**{k: v for k, v in filters.items() if k != "property"}, **combo_filters}
-                    
-                    combo_values = {}
-                    for prop in property_weights.keys():
-                        try:
-                            prop_filters = {**merged_filters, "property": prop}
-                            prop_vals, _ = self._extract_values(resolved, prop_filters, multiplier)
-                            if idx_p90 < len(prop_vals):
-                                # Add actual case value
-                                combo_values[prop] = _round(prop_vals[idx_p90])
-                                # Add target p90 value
-                                p90_target = np.percentile(prop_vals, 90)
-                                combo_values[f"p90_{prop}"] = _round(p90_target)
-                        except:
-                            pass
-                    selection_values_list.append(combo_values)
-                
-                case_p90["selection_values"] = selection_values_list
-                closest_cases.append(case_p90)
-                
-                result["closest_cases"] = closest_cases
-            else:
-                # Use simple property weights
-                weighted_property_values, weights, errors = self._prepare_weighted_case_selection(
-                    property_values, selection_criteria, resolved, filters, multiplier, skip
-                )
-                
-                if errors and "errors" not in skip:
-                    result["errors"] = result.get("errors", [])
-                    result["errors"].extend(errors)
-                
-                # Calculate percentiles for weighted properties
-                weighted_p10_dict = {}
-                weighted_p90_dict = {}
-                
-                for prop in weights.keys():
-                    if prop in weighted_property_values:
-                        if prop in p10_dict:
-                            weighted_p10_dict[prop] = p10_dict[prop]
-                            weighted_p90_dict[prop] = p90_dict[prop]
+                    if stat == 'p90p10':
+                        # p90p10 has [p10_dict, p90_dict] or [p10, p90]
+                        if isinstance(stat_value, list) and len(stat_value) == 2:
+                            if isinstance(stat_value[0], dict):
+                                # Multi-property
+                                targets['p10'] = stat_value[0]
+                                targets['p90'] = stat_value[1]
+                            else:
+                                # Single property
+                                prop = list(weighted_property_values.keys())[0]
+                                targets['p10'] = {prop: stat_value[0]}
+                                targets['p90'] = {prop: stat_value[1]}
+                    else:
+                        # mean or median
+                        if isinstance(stat_value, dict):
+                            targets[stat] = stat_value
                         else:
-                            p10_val, p90_val = np.percentile(weighted_property_values[prop], [10, 90])
-                            weighted_p10_dict[prop] = p10_val
-                            weighted_p90_dict[prop] = p90_val
-                
-                targets = {
-                    "p10": weighted_p10_dict,
-                    "p90": weighted_p90_dict
-                }
-                
-                result["closest_cases"] = self._find_closest_cases(
-                    weighted_property_values, targets, weights, resolved, filters, multiplier, decimals
-                )
+                            prop = list(weighted_property_values.keys())[0]
+                            targets[stat] = {prop: stat_value}
         
-        return result
-    
-    def _compute_mean(
-        self,
-        property_values: Dict[str, np.ndarray],
-        resolved: str,
-        filters: Dict[str, Any],
-        multiplier: float,
-        options: Dict[str, Any],
-        case_selection: bool,
-        selection_criteria: Dict[str, Any],
-        skip: List[str],
-        decimals: int,
-        _round
-    ) -> Dict:
-        """Compute mean with optional case selection."""
-        mean_dict = {prop: _round(float(np.mean(vals))) for prop, vals in property_values.items()}
-        
-        result = {}
-        if len(property_values) == 1:
-            result["mean"] = mean_dict[list(property_values.keys())[0]]
-        else:
-            result["mean"] = mean_dict
-        
-        # Handle case selection
-        if case_selection and "closest_case" not in skip:
-            weighted_property_values, weights, errors = self._prepare_weighted_case_selection(
-                property_values, selection_criteria, resolved, filters, multiplier, skip
+        # Find closest cases for accumulated targets
+        if targets:
+            found_cases = self._find_closest_cases(
+                weighted_property_values, targets, weights,
+                resolved, filters, multiplier, decimals
             )
-            
-            if errors and "errors" not in skip:
-                result["errors"] = result.get("errors", [])
-                result["errors"].extend(errors)
-            
-            # Calculate means for weighted properties
-            weighted_mean_dict = {}
-            for prop in weights.keys():
-                if prop in weighted_property_values:
-                    if prop in mean_dict:
-                        weighted_mean_dict[prop] = mean_dict[prop]
-                    else:
-                        weighted_mean_dict[prop] = _round(np.mean(weighted_property_values[prop]))
-            
-            targets = {"mean": weighted_mean_dict}
-            
-            result["closest_cases"] = self._find_closest_cases(
-                weighted_property_values, targets, weights, resolved, filters, multiplier, decimals
-            )
+            closest_cases.extend(found_cases)
         
-        return result
-    
-    def _compute_median(
-        self,
-        property_values: Dict[str, np.ndarray],
-        resolved: str,
-        filters: Dict[str, Any],
-        multiplier: float,
-        options: Dict[str, Any],
-        case_selection: bool,
-        selection_criteria: Dict[str, Any],
-        skip: List[str],
-        decimals: int,
-        _round
-    ) -> Dict:
-        """Compute median with optional case selection."""
-        median_dict = {prop: _round(float(np.median(vals))) for prop, vals in property_values.items()}
-        
-        result = {}
-        if len(property_values) == 1:
-            result["median"] = median_dict[list(property_values.keys())[0]]
-        else:
-            result["median"] = median_dict
-        
-        # Handle case selection
-        if case_selection and "closest_case" not in skip:
-            weighted_property_values, weights, errors = self._prepare_weighted_case_selection(
-                property_values, selection_criteria, resolved, filters, multiplier, skip
-            )
-            
-            if errors and "errors" not in skip:
-                result["errors"] = result.get("errors", [])
-                result["errors"].extend(errors)
-            
-            # Calculate medians for weighted properties
-            weighted_median_dict = {}
-            for prop in weights.keys():
-                if prop in weighted_property_values:
-                    if prop in median_dict:
-                        weighted_median_dict[prop] = median_dict[prop]
-                    else:
-                        weighted_median_dict[prop] = _round(np.median(weighted_property_values[prop]))
-            
-            targets = {"median": weighted_median_dict}
-            
-            result["closest_cases"] = self._find_closest_cases(
-                weighted_property_values, targets, weights, resolved, filters, multiplier, decimals
-            )
-        
-        return result
-    
-    def _compute_minmax(
-        self,
-        property_values: Dict[str, np.ndarray],
-        resolved: str,
-        filters: Dict[str, Any],
-        multiplier: float,
-        case_selection: bool,
-        selection_criteria: Dict[str, Any],
-        skip: List[str],
-        decimals: int,
-        _round
-    ) -> Dict:
-        """Compute min and max with exact case matching."""
-        min_dict = {prop: _round(float(np.min(vals))) for prop, vals in property_values.items()}
-        max_dict = {prop: _round(float(np.max(vals))) for prop, vals in property_values.items()}
-
-        if len(property_values) == 1:
-            prop = list(property_values.keys())[0]
-            result = {"minmax": [min_dict[prop], max_dict[prop]]}
-        else:
-            result = {"minmax": [min_dict, max_dict]}
-        
-        # Minmax always finds exact matching cases (no complex selection criteria needed)
-        if case_selection and "closest_case" not in skip:
-            closest_cases = []
-            first_prop = list(property_values.keys())[0]
-            
-            # Find exact min case
-            idx_min = np.argmin(property_values[first_prop])
-            min_value = _round(property_values[first_prop][idx_min])
-            case_min = self._get_case_details(
-                int(idx_min), resolved, filters, multiplier,
-                property_values[first_prop][idx_min], decimals
-            )
-            case_min["case"] = "min"
-            case_min["selection_method"] = "exact"
-            
-            # Add selection_values with target (for minmax, actual = target)
-            selection_values = {}
-            for prop in property_values.keys():
-                actual_val = _round(property_values[prop][idx_min])
-                selection_values[prop] = actual_val
-                selection_values[f"min_{prop}"] = actual_val  # Target is same as actual
-            case_min["selection_values"] = selection_values
-            closest_cases.append(case_min)
-            
-            # Find exact max case
-            idx_max = np.argmax(property_values[first_prop])
-            max_value = _round(property_values[first_prop][idx_max])
-            case_max = self._get_case_details(
-                int(idx_max), resolved, filters, multiplier,
-                property_values[first_prop][idx_max], decimals
-            )
-            case_max["case"] = "max"
-            case_max["selection_method"] = "exact"
-            
-            # Add selection_values with target
-            selection_values = {}
-            for prop in property_values.keys():
-                actual_val = _round(property_values[prop][idx_max])
-                selection_values[prop] = actual_val
-                selection_values[f"max_{prop}"] = actual_val  # Target is same as actual
-            case_max["selection_values"] = selection_values
-            closest_cases.append(case_max)
-            
-            result["closest_cases"] = closest_cases
-        
-        return result
-    
-    def _compute_percentile(
-        self,
-        property_values: Dict[str, np.ndarray],
-        resolved: str,
-        filters: Dict[str, Any],
-        multiplier: float,
-        options: Dict[str, Any],
-        case_selection: bool,
-        selection_criteria: Dict[str, Any],
-        skip: List[str],
-        decimals: int,
-        _round
-    ) -> Dict:
-        """Compute arbitrary percentile with optional case selection."""
-        p = options.get("p", 50)
-        perc_dict = {prop: _round(float(np.percentile(vals, p))) for prop, vals in property_values.items()}
-        
-        result = {}
-        if len(property_values) == 1:
-            result[f"p{p}"] = perc_dict[list(property_values.keys())[0]]
-        else:
-            result[f"p{p}"] = perc_dict
-        
-        # Handle case selection
-        if case_selection and "closest_case" not in skip:
-            weighted_property_values, weights, errors = self._prepare_weighted_case_selection(
-                property_values, selection_criteria, resolved, filters, multiplier, skip
-            )
-            
-            if errors and "errors" not in skip:
-                result["errors"] = result.get("errors", [])
-                result["errors"].extend(errors)
-            
-            # Calculate percentiles for weighted properties
-            weighted_perc_dict = {}
-            for prop in weights.keys():
-                if prop in weighted_property_values:
-                    if prop in perc_dict:
-                        weighted_perc_dict[prop] = perc_dict[prop]
-                    else:
-                        weighted_perc_dict[prop] = _round(np.percentile(weighted_property_values[prop], p))
-            
-            targets = {f"p{p}": weighted_perc_dict}
-            
-            result["closest_cases"] = self._find_closest_cases(
-                weighted_property_values, targets, weights, resolved, filters, multiplier, decimals
-            )
-        
-        return result
-    
-    def _compute_distribution(
-        self,
-        property_values: Dict[str, np.ndarray],
-        decimals: int,
-        _round
-    ) -> Dict:
-        """Return full distribution of values (no aggregation).
-        
-        Returns numpy arrays directly for better performance.
-        """
-        # Use numpy's vectorized rounding instead of Python's round in a loop
-        dist_dict = {prop: np.round(vals, decimals) for prop, vals in property_values.items()}
-
-        if len(property_values) == 1:
-            return {"distribution": dist_dict[list(property_values.keys())[0]]}
-        else:
-            return {"distribution": dist_dict}
+        return closest_cases
     
     # ================================================================
     # PUBLIC API - INFORMATION ACCESS
@@ -1463,53 +1349,33 @@ class TornadoProcessor:
                 result["errors"] = ["No data could be extracted for any property"]
             return result
         
-        # Calculate each stat using helper functions
-        for stat in stats:
-            if stat == "p90p10":
-                stat_result = self._compute_p90p10(
-                    property_values, resolved, filters, multiplier, 
-                    options, case_selection, selection_criteria, skip, decimals, _round
-                )
-                result.update(stat_result)
-            
-            elif stat == "mean":
-                stat_result = self._compute_mean(
-                    property_values, resolved, filters, multiplier,
-                    options, case_selection, selection_criteria, skip, decimals, _round
-                )
-                result.update(stat_result)
-            
-            elif stat == "median":
-                stat_result = self._compute_median(
-                    property_values, resolved, filters, multiplier,
-                    options, case_selection, selection_criteria, skip, decimals, _round
-                )
-                result.update(stat_result)
-            
-            elif stat == "minmax":
-                stat_result = self._compute_minmax(
-                    property_values, resolved, filters, multiplier,
-                    case_selection, selection_criteria, skip, decimals, _round
-                )
-                result.update(stat_result)
-            
-            elif stat == "percentile":
-                stat_result = self._compute_percentile(
-                    property_values, resolved, filters, multiplier,
-                    options, case_selection, selection_criteria, skip, decimals, _round
-                )
-                result.update(stat_result)
-            
-            elif stat == "distribution":
-                stat_result = self._compute_distribution(property_values, decimals, _round)
-                result.update(stat_result)
-            
-            else:
-                raise ValueError(
-                    f"Unknown stat '{stat}'. Valid: "
-                    "['p90p10', 'mean', 'median', 'minmax', 'percentile', 'distribution']"
-                )
+        # Compute ALL stats efficiently in one pass using the new engine
+        stats_result = self._compute_all_stats(
+            property_values,
+            stats,
+            options,
+            decimals,
+            skip
+        )
+        result.update(stats_result)
         
+        # Handle case selection separately (only if requested)
+        if case_selection and "closest_case" not in skip:
+            closest_cases = self._perform_case_selection(
+                property_values,
+                stats,
+                stats_result,
+                selection_criteria,
+                resolved,
+                filters,
+                multiplier,
+                skip,
+                decimals
+            )
+            if closest_cases:
+                result["closest_cases"] = closest_cases
+        
+        # Add sources if not skipped
         if "sources" not in skip:
             if is_multi_property:
                 result["sources"] = property_sources
@@ -1862,3 +1728,79 @@ class TornadoProcessor:
         )
 
         return result["distribution"]
+    
+    def tornado_data(
+        self,
+        parameters: Union[str, List[str]] = "all",
+        filters: Union[Dict[str, Any], str] = None,
+        multiplier: float = None,
+        options: Dict[str, Any] = None
+    ) -> Dict:
+        """Get tornado chart data (p90p10 ranges) formatted for easy plotting.
+
+        Returns a dictionary with parameter names as keys and their p90p10 ranges.
+
+        Args:
+            parameters: Parameters to include (default "all")
+            filters: Filters dict or stored filter name
+            multiplier: Override default multiplier
+            options: Options including skip list, p90p10_threshold (default 10), etc.
+
+        Returns:
+            Dictionary with structure:
+            {
+                'parameter_name': {
+                    'p10': value,
+                    'p90': value,
+                    'range': p90 - p10,
+                    'midpoint': (p90 + p10) / 2
+                },
+                ...
+            }
+            
+        Examples:
+            # Get tornado data for all parameters
+            data = processor.tornado_data(filters='my_zones')
+            
+            # Get tornado data with custom multiplier
+            data = processor.tornado_data(
+                filters={'property': 'stoiip'},
+                multiplier=1e-6
+            )
+        """
+        results = self.compute_batch(
+            stats='p90p10',
+            parameters=parameters,
+            filters=filters,
+            multiplier=multiplier,
+            options=options
+        )
+        
+        if not isinstance(results, list):
+            results = [results]
+        
+        tornado_data = {}
+        
+        for result in results:
+            param = result.get("parameter")
+            if "p90p10" in result and "errors" not in result:
+                p10, p90 = result["p90p10"]
+                
+                # Handle multi-property case
+                if isinstance(p10, dict):
+                    # Use first property for tornado display
+                    first_prop = list(p10.keys())[0]
+                    p10_val = p10[first_prop]
+                    p90_val = p90[first_prop]
+                else:
+                    p10_val = p10
+                    p90_val = p90
+                
+                tornado_data[param] = {
+                    'p10': p10_val,
+                    'p90': p90_val,
+                    'range': p90_val - p10_val,
+                    'midpoint': (p90_val + p10_val) / 2
+                }
+        
+        return tornado_data
