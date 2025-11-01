@@ -1,39 +1,21 @@
 # TornadoPy
 
-A Python library for tornado chart generation and analysis. TornadoPy provides tools for processing Excel-based tornado data and generating professional tornado charts for uncertainty analysis.
+A Python library for generating fast tornado and distribution plots using static model results from uncertainty analysis run in SLB Petrel.
+
+TornadoPy provides efficient data processing and visualization tools for analyzing sensitivity and uncertainty results from reservoir modeling workflows. It leverages Polars for fast data manipulation and Matplotlib for publication-quality charts.
 
 ## Features
 
-- **TornadoProcessor**: Process Excel files containing tornado analysis data
-  - Parse multi-sheet Excel files with complex headers
-  - Extract and compute statistics (p90p10, mean, median, minmax, percentiles)
-  - Filter data by properties and dynamic fields
-  - Named filter presets for reusable filter combinations
-  - Base and reference case extraction with caching
-  - Default multiplier support for consistent unit conversion
-  - Case selection with weighted criteria
-  - Batch processing for multiple parameters
-  - Optimized for performance with native numpy operations
-  - Comprehensive docstrings and organized code structure
-
-- **tornado_plot**: Generate professional tornado charts
-  - Customizable colors, fonts, and styling
-  - Support for p90/p10 ranges with automatic label placement
-  - Reference case lines
-  - Custom parameter ordering
-  - Export to various image formats
-
-- **distribution_plot**: Generate distribution histograms with cumulative curves
-  - Beautiful bin sizing with round numbers
-  - Cumulative distribution curve showing % of cases above value
-  - P90/P50/P10 percentile markers and subtitle
-  - Optional reference case line
-  - Multiple color schemes available
-  - Export to various image formats
+- Fast processing of Excel-based uncertainty analysis results using Polars
+- Generate tornado charts showing parameter sensitivities
+- Create distribution plots with cumulative curves
+- Support for complex filtering and data aggregation
+- Statistical computations (P90/P10, mean, median, percentiles)
+- Case selection for representative scenarios
+- Batch processing for multiple parameters
+- Highly configurable plot styling
 
 ## Installation
-
-Install from PyPI:
 
 ```bash
 pip install tornadopy
@@ -41,734 +23,594 @@ pip install tornadopy
 
 ## Quick Start
 
-### Processing Tornado Data
+```python
+from tornadopy import TornadoProcessor, tornado_plot, distribution_plot
+
+# Load data from Excel file
+processor = TornadoProcessor("uncertainty_results.xlsx", multiplier=1e-6)
+
+# Generate tornado chart data
+results = processor.tornado(filters={'property': 'stoiip'})
+
+# Create tornado plot
+fig, ax, saved = tornado_plot(
+    results,
+    title="STOIIP Sensitivity Analysis",
+    unit="MM bbl",
+    outfile="tornado.png"
+)
+
+# Generate distribution data
+dist_data = processor.distribution(
+    parameter="NetPay",
+    filters={'property': 'stoiip'}
+)
+
+# Create distribution plot
+fig, ax, saved = distribution_plot(
+    dist_data,
+    title="Net Pay Distribution",
+    unit="MM bbl",
+    outfile="distribution.png"
+)
+```
+
+## Data Setup
+
+### Excel File Structure
+
+TornadoPy expects uncertainty analysis results stored in an Excel file with a specific layout:
+
+1. **Multiple Sheets (Tabs)**: Each parameter should be stored in a separate sheet
+2. **Single Row Output Table**: Generate single row output tables in Petrel
+3. **Segmentation**: Split results by Zones, Segments, or Boundaries as preferred
+
+### Sheet Layout
+
+Each sheet should follow this structure:
+
+```
+Row 1-N:     [Metadata rows - optional]
+             Key: Value
+             Description: Additional info
+
+Header rows: Zone   Segment  Property
+             z1     seg1     stoiip    z1  seg2  stoiip    z2  seg1  stoiip
+Case row:    Case   Case     Case      ...
+Data rows:   Case1  123.4    456.7     ...
+             Case2  125.1    458.2     ...
+             Case3  ...
+```
+
+**Important Layout Rules:**
+
+1. **"Case" Row**: Must contain the text "Case" in the first column. This marks where data begins.
+
+2. **Header Block**: One or more rows above the "Case" row that define column structure:
+   - First column contains field names (Zone, Segment, Boundary, etc.)
+   - Remaining columns contain the values for each combination
+   - Headers are automatically combined (e.g., "z1_seg1_stoiip")
+
+3. **Data Block**: Starts immediately after the "Case" row:
+   - Each row represents a different uncertainty case
+   - Values should be numeric
+   - First column can contain case identifiers (optional)
+
+4. **Properties**: Each unique property (e.g., stoiip, giip, npv) should be clearly labeled in headers
+
+5. **Base Case and Reference Case** (Optional): Can be stored in a separate sheet:
+   - Row 0: Base case values
+   - Row 1: Reference case values (optional)
+   - Same column structure as other parameters
+
+### Example Sheet Structure
+
+```
+Metadata:    Reservoir: North Field
+             Date: 2024-01-15
+
+Headers:     Zone    Zone    Zone    Zone
+             North   North   South   South
+             stoiip  giip    stoiip  giip
+Case:        Case    Case    Case    Case
+Data:        Case1   150.2   45.3    98.1    29.4
+             Case2   155.8   46.1    102.3   30.2
+             Case3   148.9   44.8    95.7    28.9
+             ...     ...     ...     ...     ...
+```
+
+### Excel File Preparation Workflow
+
+1. **In Petrel**:
+   - Run your uncertainty analysis
+   - For each parameter, create a single-row output table
+   - Export results to Excel
+
+2. **In Excel**:
+   - Create a new workbook
+   - Create one sheet per parameter (e.g., "NetPay", "Porosity", "NTG")
+   - Optionally create a "BaseCases" sheet with base and reference case values
+   - Paste Petrel results into each sheet following the layout above
+   - Ensure the "Case" row is present
+   - Save as `.xlsx` or `.xlsb` format
+
+## Using the TornadoProcessor
+
+### Initialization
 
 ```python
-from tornadopy import TornadoProcessor
+# Basic initialization
+processor = TornadoProcessor("data.xlsx")
 
-# Load Excel file with tornado data
-# Optional: Set default multiplier and base case sheet
+# With multiplier (e.g., convert to millions)
+processor = TornadoProcessor("data.xlsx", multiplier=1e-6)
+
+# With base case sheet
 processor = TornadoProcessor(
-    "tornado_data.xlsb",
-    multiplier=1e-6,  # Default multiplier for all operations
-    base_case="Reference_Case"  # Sheet containing base/reference cases
-)
-
-# Get available parameters
-parameters = processor.parameters()
-print(f"Parameters: {parameters}")
-
-# Get properties for a parameter
-properties = processor.properties(parameter="Parameter1")
-print(f"Properties: {properties}")
-
-# Compute statistics
-result = processor.compute(
-    stats="p90p10",
-    parameter="Parameter1",
-    filters={"property": "npv"},
-    multiplier=1e-6  # Convert to millions (or use default if set)
-)
-print(f"P90/P10: {result['p90p10']}")
-```
-
-### Generating Tornado Charts
-
-```python
-from tornadopy import TornadoProcessor, tornado_plot
-
-# Get tornado data
-processor = TornadoProcessor("tornado_data.xlsb")
-tornado_data = processor.get_tornado_data(
-    parameters="all",
-    filters={"property": "npv"},
-    multiplier=1e-6
-)
-
-# Convert to sections format for plotting
-sections = []
-for param, data in tornado_data.items():
-    sections.append({
-        "parameter": param,
-        "minmax": [data["p10"], data["p90"]],
-        "p90p10": [data["p10"], data["p90"]]
-    })
-
-# Generate tornado chart
-fig, ax, saved = tornado_plot(
-    sections=sections,
-    title="NPV Tornado Chart",
-    subtitle="Base case = 100.0 MM USD",
-    base=100.0,
-    unit="MM USD",
-    outfile="tornado_chart.png"
-)
-```
-
-### Generating Distribution Charts
-
-```python
-from tornadopy import TornadoProcessor, distribution_plot
-
-# Get distribution data
-processor = TornadoProcessor("tornado_data.xlsb")
-distribution = processor.distribution(
-    parameter="Parameter1",
-    filters={"property": "npv"},
-    multiplier=1e-6
-)
-
-# Generate distribution chart
-fig, ax, saved = distribution_plot(
-    distribution,
-    title="NPV Distribution",
-    unit="MM USD",
-    color="blue",
-    reference_case=100.0,
-    outfile="npv_distribution.png"
-)
-```
-
-### Advanced Usage
-
-#### Multi-Zone Analysis with Batch Processing
-
-Process multiple parameters at once with zone filtering and custom options:
-
-```python
-from tornadopy import TornadoProcessor, tornado_plot
-
-processor = TornadoProcessor("reservoir_data.xlsb")
-
-# Compute statistics for all parameters with zone filtering
-results = processor.compute_batch(
-    stats=["minmax", "p90p10"],
-    parameters="all",
-    filters={
-        "zones": ["Zone A - Reservoir", "Zone B - Reservoir"],
-        "property": "STOIIP"
-    },
-    multiplier=1e-3,  # Convert to thousands
-    options={
-        "p90p10_threshold": 150,  # Minimum cases required
-        "skip": ["sources"]  # Skip source tracking for cleaner output
-    }
-)
-
-# Convert results to tornado plot format
-sections = []
-for result in results:
-    if "p90p10" in result and "errors" not in result:
-        p10, p90 = result["p90p10"]
-        sections.append({
-            "parameter": result["parameter"],
-            "minmax": result.get("minmax", [p10, p90]),
-            "p90p10": [p10, p90]
-        })
-
-# Generate tornado chart
-fig, ax, saved = tornado_plot(
-    sections,
-    title="STOIIP Tornado - Multi-Zone Analysis",
-    base=14.5,  # Base case value
-    reference_case=14.2,  # Reference case line
-    unit="MM m³",
-    outfile="stoiip_tornado.svg"
-)
-```
-
-#### Distribution Plot with Custom Gridlines
-
-Create distribution charts with percentile markers and custom grid settings:
-
-```python
-from tornadopy import TornadoProcessor, distribution_plot
-
-processor = TornadoProcessor("reservoir_data.xlsb")
-
-# Get distribution data for specific zones
-distribution = processor.distribution(
-    parameter="Uncertainty_Analysis",
-    filters={
-        "zones": ["Zone A - Reservoir", "Zone B - Reservoir"],
-        "property": "STOIIP"
-    },
-    multiplier=1e-3  # Convert to thousands
-)
-
-# Generate distribution chart with custom settings
-fig, ax, saved = distribution_plot(
-    data=distribution,
-    title="STOIIP Distribution - Uncertainty Analysis",
-    unit="MM m³",
-    color="blue",
-    reference_case=14.5,
-    target_bins=20,
-    settings={
-        "show_percentile_markers": True,  # Show P90/P50/P10 markers
-        "marker_size": 8,
-        "show_minor_grid": True,
-        # Custom gridline intervals
-        "x_major_interval": 5,   # Major x-gridlines every 5 units
-        "x_minor_interval": 1,   # Minor x-gridlines every 1 unit
-        "y_major_interval": 50,  # Major y-gridlines every 50 frequency
-        "y_minor_interval": 10,  # Minor y-gridlines every 10 frequency
-    },
-    outfile="stoiip_distribution.svg"
-)
-```
-
-#### Working with Multiple Properties
-
-Analyze multiple properties simultaneously:
-
-```python
-# Compute statistics for multiple properties
-result = processor.compute(
-    stats=["p90p10", "mean", "median"],
-    parameter="Reservoir_Model",
-    filters={
-        "zones": ["Main_Reservoir"],
-        "property": ["STOIIP", "GIIP"]  # Multiple properties
-    },
-    multiplier=1e-6  # Convert to millions
-)
-
-# Access results by property
-stoiip_p90, stoiip_p10 = result["p90p10"][0]  # First property (STOIIP)
-giip_p90, giip_p10 = result["p90p10"][1]      # Second property (GIIP)
-
-print(f"STOIIP P90/P10: {stoiip_p90:.2f} / {stoiip_p10:.2f} MM m³")
-print(f"GIIP P90/P10: {giip_p90:.2f} / {giip_p10:.2f} bcm")
-```
-
-#### Case Selection with Weighted Criteria
-
-Find specific cases that match target percentiles:
-
-```python
-# Find closest cases to p90/p10 with custom weights
-result = processor.compute(
-    stats="p90p10",
-    parameter="Reservoir_Model",
-    filters={
-        "zones": ["Main_Reservoir"],
-        "property": "STOIIP"
-    },
+    "data.xlsx",
     multiplier=1e-6,
-    case_selection=True,  # Enable case selection
-    selection_criteria={
-        "weights": {"STOIIP": 0.6, "GIIP": 0.4}  # Weighted criteria
-    }
+    base_case="BaseCases"  # Sheet name containing base/reference values
 )
-
-# Access closest cases
-for case in result["closest_cases"]:
-    print(f"Case {case['case']}: index={case['idx']}, STOIIP={case['STOIIP']:.2f}")
-    print(f"  Properties: {case['properties']}")
 ```
 
-#### Skipping Specific Parameters
-
-Exclude certain parameters from batch processing:
+### Exploring Your Data
 
 ```python
-# Process all parameters except specific ones
+# List all available parameters (sheet names)
+parameters = processor.parameters()
+print(parameters)  # ['NetPay', 'Porosity', 'NTG', 'BaseCases']
+
+# List all properties for a parameter
+properties = processor.properties("NetPay")
+print(properties)  # ['stoiip', 'giip', 'npv']
+
+# Get unique values for dynamic fields (zones, segments, etc.)
+zones = processor.unique_values("zone", parameter="NetPay")
+segments = processor.unique_values("segment", parameter="NetPay")
+```
+
+### Extracting Statistics
+
+```python
+# Compute P90/P10 for a single property
+result = processor.compute(
+    stats='p90p10',
+    parameter='NetPay',
+    filters={'property': 'stoiip', 'zone': 'z1'}
+)
+print(result)
+# {'parameter': 'NetPay', 'p90p10': [145.2, 182.7], 'sources': [...]}
+
+# Compute multiple statistics
+result = processor.compute(
+    stats=['mean', 'median', 'p90p10'],
+    filters={'property': 'stoiip'}
+)
+print(result)
+# {'parameter': 'NetPay', 'mean': 163.5, 'median': 162.8, 'p90p10': [145.2, 182.7]}
+
+# Multi-property computation
+result = processor.compute(
+    stats='mean',
+    filters={'property': ['stoiip', 'giip']}
+)
+print(result)
+# {'parameter': 'NetPay', 'mean': {'stoiip': 163.5, 'giip': 48.2}}
+```
+
+### Batch Processing
+
+```python
+# Process all parameters at once
 results = processor.compute_batch(
-    stats="p90p10",
-    parameters="all",
-    filters={"property": "STOIIP"},
-    multiplier=1e-3,
-    options={
-        "skip_parameters": ["Reference_Case", "Full_Uncertainty"],  # Skip these
-        "skip": ["sources", "errors"]  # Skip these fields in output
-    }
+    stats='p90p10',
+    parameters='all',  # or specify list: ['NetPay', 'Porosity']
+    filters={'property': 'stoiip', 'zone': ['z1', 'z2']}
+)
+
+# Results is a list of dictionaries, one per parameter
+for result in results:
+    print(f"{result['parameter']}: {result['p90p10']}")
+```
+
+### Using Filters
+
+```python
+# Simple filter
+result = processor.compute(
+    'mean',
+    filters={'property': 'stoiip', 'zone': 'z1'}
+)
+
+# Multiple values (aggregates across zones)
+result = processor.compute(
+    'mean',
+    filters={'property': 'stoiip', 'zone': ['z1', 'z2', 'z3']}
+)
+
+# Store filter presets for reuse
+processor.set_filter('north_zones', {'zone': ['z1', 'z2', 'z3']})
+processor.set_filter('south_zones', {'zone': ['z4', 'z5']})
+
+# Use stored filter
+result = processor.compute('mean', filters='north_zones')
+```
+
+### Working with Base and Reference Cases
+
+```python
+# Get base case value for a property
+base_stoiip = processor.base_case('stoiip')
+
+# Get all base case values
+base_all = processor.base_case()
+
+# Get reference case
+ref_stoiip = processor.ref_case('stoiip')
+
+# With filters
+base_filtered = processor.base_case(
+    'stoiip',
+    filters={'zone': ['z1', 'z2']}
+)
+
+# With custom multiplier
+base_mm = processor.base_case('stoiip', multiplier=1e-6)
+```
+
+### Generating Tornado Data
+
+The `tornado()` method is a convenience function that computes both minmax and p90p10 statistics for all parameters:
+
+```python
+# Generate tornado data for all parameters
+tornado_data = processor.tornado(
+    filters={'property': 'stoiip'},
+    multiplier=1e-6
+)
+
+# With options
+tornado_data = processor.tornado(
+    filters={'property': 'stoiip'},
+    skip='sources',  # Don't include source columns
+    options={'decimals': 2}
+)
+
+# The result is ready to pass directly to tornado_plot()
+```
+
+### Extracting Distribution Data
+
+```python
+# Get distribution for a parameter
+dist = processor.distribution(
+    parameter='NetPay',
+    filters={'property': 'stoiip', 'zone': 'z1'},
+    multiplier=1e-6
+)
+
+# dist is a numpy array of all case values
+# Pass directly to distribution_plot()
+```
+
+### Case Selection
+
+Find representative cases that best match statistical targets:
+
+```python
+# Find cases closest to mean with weighted properties
+result = processor.compute(
+    'mean',
+    filters={'property': 'stoiip'},
+    case_selection=True,
+    selection_criteria={'weights': {'stoiip': 0.6, 'giip': 0.4}}
+)
+
+# Result includes closest_cases with full case details
+print(result['closest_cases'])
+# [{'idx': 42, 'stoiip': 163.2, 'case': 'mean', 'properties': {...}, ...}]
+```
+
+## Plotting
+
+### Tornado Plot
+
+Create publication-quality tornado charts:
+
+```python
+from tornadopy import tornado_plot
+
+# Basic tornado plot
+fig, ax, saved = tornado_plot(
+    tornado_data,
+    title="STOIIP Sensitivity Analysis",
+    unit="MM bbl",
+    outfile="tornado.png"
+)
+
+# With reference case line
+fig, ax, saved = tornado_plot(
+    tornado_data,
+    title="STOIIP Sensitivity",
+    base=150.0,
+    reference_case=155.0,
+    unit="MM bbl"
+)
+
+# With preferred parameter order
+fig, ax, saved = tornado_plot(
+    tornado_data,
+    title="STOIIP Sensitivity",
+    preferred_order=["NetPay", "Porosity", "NTG"],  # Show these first
+    unit="MM bbl"
 )
 ```
 
-#### Custom Tornado Chart Styling
+### Customizing Tornado Plots
 
-Full control over chart appearance:
+Control the appearance with the `settings` parameter:
 
 ```python
-# Custom styling for professional reports
-settings = {
-    "figsize": (12, 8),
-    "dpi": 200,
-    "pos_dark": "#1E88E5",  # Blue for positive
-    "neg_dark": "#D32F2F",  # Red for negative
-    "show_values": ["min", "max", "p10", "p90"],
-    "show_percentage_diff": True,
+custom_settings = {
+    'figsize': (12, 8),
+    'dpi': 200,
+    'pos_light': '#A9CFF7',  # Light blue for positive bars
+    'neg_light': '#F5B7B1',  # Light red for negative bars
+    'pos_dark': '#2E5BFF',   # Dark blue for P90/P10 overlay
+    'neg_dark': '#E74C3C',   # Dark red for P90/P10 overlay
+    'show_values': ['min', 'p10', 'p90', 'max'],  # Which values to label
+    'show_value_headers': True,
+    'show_relative_values': False,  # Show absolute values
+    'show_percentage_diff': True,   # Show % difference from base
+    'value_format': '{:.1f}',
+    'bar_height': 0.6,
+    'label_fontsize': 9,
 }
 
 fig, ax, saved = tornado_plot(
-    sections=sections,
-    title="Reservoir Volume Sensitivity Analysis",
-    subtitle="Base Case: 100 MM m³",
-    base=100.0,
-    reference_case=95.0,
-    unit="MM m³",
-    preferred_order=["Porosity", "NTG", "Area"],  # Custom parameter order
-    settings=settings,
-    outfile="sensitivity_analysis.png"
+    tornado_data,
+    title="Custom Tornado Chart",
+    unit="MM bbl",
+    settings=custom_settings
 )
 ```
 
-## Common Workflows
+**Key Tornado Plot Settings:**
 
-### Complete Reservoir Uncertainty Analysis
+- **Colors**: `pos_light`, `neg_light`, `pos_dark`, `neg_dark`, `baseline_color`, `reference_color`
+- **Sizes**: `figsize`, `dpi`, `bar_height`, `bar_linewidth`
+- **Values**: `show_values` (list), `show_value_headers` (bool), `value_format` (str)
+- **Labels**: `show_relative_values` (bool), `show_percentage_diff` (bool)
+- **Font sizes**: `title_fontsize`, `subtitle_fontsize`, `label_fontsize`, `value_fontsize`
 
-End-to-end workflow for reservoir analysis with tornado and distribution charts:
+### Distribution Plot
+
+Create histograms with cumulative distribution curves:
+
+```python
+from tornadopy import distribution_plot
+
+# Basic distribution
+fig, ax, saved = distribution_plot(
+    dist_data,
+    title="Net Pay Distribution",
+    unit="MM bbl",
+    outfile="distribution.png"
+)
+
+# With reference case and custom bins
+fig, ax, saved = distribution_plot(
+    dist_data,
+    title="Net Pay Distribution",
+    unit="MM bbl",
+    reference_case=150.0,
+    target_bins=30,
+    color="blue"
+)
+```
+
+### Customizing Distribution Plots
+
+```python
+custom_settings = {
+    'figsize': (12, 7),
+    'dpi': 200,
+    'bar_color': '#66C3EB',  # Light blue bars
+    'bar_outline_color': '#0075A6',  # Dark blue outline
+    'cumulative_color': '#BA2A19',  # Dark red cumulative line
+    'cumulative_linewidth': 3.0,
+    'show_percentile_markers': True,  # Show P90/P50/P10 markers
+    'target_bins': 25,
+    'show_minor_grid': True,
+}
+
+fig, ax, saved = distribution_plot(
+    dist_data,
+    title="Custom Distribution",
+    unit="MM bbl",
+    settings=custom_settings
+)
+```
+
+**Available Color Schemes:**
+- `"red"`, `"blue"`, `"green"`, `"orange"`, `"purple"`, `"fuchsia"`, `"yellow"`
+
+**Key Distribution Plot Settings:**
+
+- **Colors**: Color scheme name or custom `bar_color`, `bar_outline_color`, `cumulative_color`
+- **Sizes**: `figsize`, `dpi`, `bar_linewidth`, `cumulative_linewidth`
+- **Bins**: `target_bins` (int) - number of histogram bins
+- **Grid**: `show_minor_grid` (bool), `grid_alpha`, `minor_grid_alpha`
+- **Markers**: `show_percentile_markers` (bool), `marker_size`, `marker_color`
+- **Font sizes**: `title_fontsize`, `subtitle_fontsize`, `label_fontsize`, `tick_fontsize`
+
+## Complete Workflow Example
 
 ```python
 from tornadopy import TornadoProcessor, tornado_plot, distribution_plot
-import matplotlib.pyplot as plt
 
-# Load data
-processor = TornadoProcessor("reservoir_uncertainty.xlsb")
-
-# Define common filters
-zones = ["Main Reservoir - SST1", "Main Reservoir - SST2"]
-multiplier = 1e-3  # Convert to thousands
-
-# 1. Generate STOIIP Tornado Chart
-stoiip_results = processor.compute_batch(
-    stats=["minmax", "p90p10"],
-    parameters="all",
-    filters={
-        "zones": zones,
-        "property": "STOIIP"
-    },
-    multiplier=multiplier,
-    options={
-        "p90p10_threshold": 150,
-        "skip_parameters": ["Reference_Case", "Full_Uncertainty"]
-    }
-)
-
-# Convert to tornado format
-sections = []
-for result in stoiip_results:
-    if "p90p10" in result and "errors" not in result:
-        p10, p90 = result["p90p10"]
-        min_val, max_val = result.get("minmax", [p10, p90])
-        sections.append({
-            "parameter": result["parameter"],
-            "minmax": [min_val, max_val],
-            "p90p10": [p10, p90]
-        })
-
-# Create tornado chart
-fig1, ax1, saved1 = tornado_plot(
-    sections,
-    title="STOIIP Sensitivity Analysis",
-    base=14.5,
-    reference_case=14.2,
-    unit="MM m³",
-    outfile="stoiip_tornado.svg"
-)
-
-# 2. Generate Distribution Chart
-distribution = processor.distribution(
-    parameter="Full_Uncertainty",
-    filters={
-        "zones": zones,
-        "property": "STOIIP"
-    },
-    multiplier=multiplier
-)
-
-fig2, ax2, saved2 = distribution_plot(
-    data=distribution,
-    title="STOIIP Distribution - Full Uncertainty",
-    unit="MM m³",
-    color="blue",
-    reference_case=14.5,
-    settings={
-        "show_percentile_markers": True,
-        "x_major_interval": 5,
-        "x_minor_interval": 1,
-    },
-    outfile="stoiip_distribution.svg"
-)
-
-# Show both charts
-plt.show()
-
-print(f"Charts saved: {saved1}, {saved2}")
-```
-
-### Comparing Multiple Scenarios
-
-Compare different reservoir scenarios side by side:
-
-```python
-from tornadopy import TornadoProcessor, distribution_plot
-import matplotlib.pyplot as plt
-import numpy as np
-
-processor = TornadoProcessor("scenarios.xlsb")
-
-# Define scenarios
-scenarios = [
-    {"name": "Base Case", "param": "Base_Case", "color": "blue"},
-    {"name": "Optimistic", "param": "Optimistic", "color": "green"},
-    {"name": "Pessimistic", "param": "Pessimistic", "color": "red"},
-]
-
-# Create subplots for comparison
-fig, axes = plt.subplots(1, 3, figsize=(18, 6))
-
-for idx, scenario in enumerate(scenarios):
-    dist = processor.distribution(
-        parameter=scenario["param"],
-        filters={"property": "NPV"},
-        multiplier=1e-6
-    )
-
-    distribution_plot(
-        data=dist,
-        title=f"{scenario['name']} Scenario",
-        unit="MM USD",
-        color=scenario["color"],
-        target_bins=15,
-        outfile=None  # Don't save individual plots
-    )
-
-    # Move the plot to the subplot
-    plt.close()
-
-plt.tight_layout()
-plt.savefig("scenario_comparison.png", dpi=200)
-plt.show()
-```
-
-## Tips and Best Practices
-
-### Filter Management (NEW)
-
-Store and reuse filter presets for consistent analysis:
-
-```python
-from tornadopy import TornadoProcessor
-
-processor = TornadoProcessor("reservoir_data.xlsb")
-
-# Store commonly used filter combinations
-processor.set_filter('main_zones', {
-    'zones': ['Main Reservoir - SST1', 'Main Reservoir - SST2'],
-    'property': 'STOIIP'
-})
-
-processor.set_filter('north_area', {
-    'zones': ['North Zone A', 'North Zone B'],
-})
-
-# List all stored filters
-print(f"Available filters: {processor.list_filters()}")
-
-# Use stored filters by name (can be string or dict)
-result = processor.compute(
-    stats="p90p10",
-    parameter="Uncertainty_Analysis",
-    filters="main_zones",  # Reference filter by name
-    multiplier=1e-3
-)
-
-# Retrieve filter for inspection
-main_zones_filter = processor.get_filter('main_zones')
-print(f"Filter contents: {main_zones_filter}")
-
-# Can still use dict filters as before
-result = processor.compute(
-    stats="mean",
-    parameter="Porosity",
-    filters={'zones': ['Zone A'], 'property': 'STOIIP'},
-    multiplier=1e-3
-)
-```
-
-### Base and Reference Case Extraction (NEW)
-
-Extract base and reference case values when initializing with a base case sheet:
-
-```python
-from tornadopy import TornadoProcessor
-
-# Initialize with base case parameter
+# 1. Initialize processor
 processor = TornadoProcessor(
-    "reservoir_data.xlsb",
-    multiplier=1e-3,
-    base_case="Reference_Case"  # Sheet containing base (idx 0) and reference (idx 1)
+    "uncertainty_analysis.xlsx",
+    multiplier=1e-6,  # Convert to millions
+    base_case="BaseCases"
 )
 
-# Access cached base case values (extracted at initialization)
-base_values = processor.base_case_values
-print(f"Base case STOIIP: {base_values.get('STOIIP', 'N/A')}")
+# 2. Set up filter presets
+processor.set_filter('main_zones', {
+    'zone': ['Zone1', 'Zone2', 'Zone3']
+})
 
-# Access cached reference case values
-ref_values = processor.reference_case_values
-print(f"Reference case STOIIP: {ref_values.get('STOIIP', 'N/A')}")
-
-# Extract with custom filters and multiplier at runtime
-base_case_custom = processor.base_case(
-    parameter="Reference_Case",
-    filters={'zones': ['Main Reservoir']},
-    multiplier=1e-6  # Different multiplier than default
+# 3. Generate tornado chart
+tornado_data = processor.tornado(
+    filters={
+        'property': 'stoiip',
+        'zone': ['Zone1', 'Zone2', 'Zone3']
+    },
+    skip='sources',
+    options={'decimals': 1}
 )
-
-ref_case_custom = processor.ref_case(
-    parameter="Reference_Case",
-    filters={'zones': ['Main Reservoir']},
-    multiplier=1e-6
-)
-
-# Use in tornado plot
-from tornadopy import tornado_plot
-
-base_stoiip = base_values.get('STOIIP', 14.5)
-ref_stoiip = ref_values.get('STOIIP', 14.2)
 
 fig, ax, saved = tornado_plot(
-    sections=tornado_sections,
-    title="STOIIP Tornado Analysis",
-    base=base_stoiip,
-    reference_case=ref_stoiip,
-    unit="MM m³",
-    outfile="tornado.png"
+    tornado_data,
+    title="STOIIP Tornado Chart",
+    subtitle="Main Development Zones",
+    unit="MM STB",
+    preferred_order=["NetPay", "Porosity", "NTG", "Area"],
+    outfile="stoiip_tornado.png"
 )
+
+# 4. Generate distribution plot for key parameter
+dist_data = processor.distribution(
+    parameter="NetPay",
+    filters={'property': 'stoiip', 'zone': ['Zone1', 'Zone2', 'Zone3']}
+)
+
+fig, ax, saved = distribution_plot(
+    dist_data,
+    title="Net Pay Impact on STOIIP",
+    unit="MM STB",
+    reference_case=processor.ref_case('stoiip', filters='main_zones'),
+    color="blue",
+    outfile="netpay_distribution.png"
+)
+
+# 5. Compute statistics with case selection
+result = processor.compute(
+    stats=['mean', 'p90p10'],
+    parameter='NetPay',
+    filters='main_zones',
+    case_selection=True,
+    selection_criteria={'weights': {'stoiip': 0.7, 'giip': 0.3}}
+)
+
+print(f"Mean STOIIP: {result['mean']:.1f} MM STB")
+print(f"P90-P10 Range: {result['p90p10']}")
+print(f"Representative case: {result['closest_cases'][0]['idx']}")
 ```
 
-### Working with Filters
+## Advanced Features
 
-**Zone Filtering:**
+### Multi-Property Analysis
+
 ```python
-# Single zone
-filters = {"zones": "Main Reservoir", "property": "STOIIP"}
+# Compute statistics across multiple properties simultaneously
+result = processor.compute(
+    stats='mean',
+    filters={'property': ['stoiip', 'giip', 'npv']}
+)
 
-# Multiple zones (will sum values across zones)
-filters = {"zones": ["Zone A", "Zone B"], "property": "STOIIP"}
+print(result['mean'])
+# {'stoiip': 163.5, 'giip': 48.2, 'npv': 450.3}
 ```
 
-**Property Filtering:**
-```python
-# Single property
-filters = {"property": "STOIIP"}
-
-# Multiple properties (returns separate results for each)
-filters = {"property": ["STOIIP", "GIIP"]}
-```
-
-### Using Multipliers
-
-Convert units easily with the multiplier parameter:
+### Complex Case Selection
 
 ```python
-# Convert to thousands (mcm → MM m³)
-multiplier = 1e-3
-
-# Convert to millions (m³ → MM m³)
-multiplier = 1e-6
-
-# Convert to billions (m³ → bcm)
-multiplier = 1e-9
-```
-
-### Skipping Parameters
-
-Exclude specific parameters from batch processing:
-
-```python
-options = {
-    "skip_parameters": ["Reference_Case", "Full_Uncertainty"],  # Skip these parameters
-    "skip": ["sources", "errors"]  # Skip these fields in results
+# Use weighted combinations for sophisticated case selection
+selection_criteria = {
+    'combinations': [
+        {
+            'filters': {'zone': 'z1'},
+            'properties': {'stoiip': 0.5, 'giip': 0.3}
+        },
+        {
+            'filters': {'zone': 'z2'},
+            'properties': {'stoiip': 0.2}
+        }
+    ]
 }
+
+result = processor.compute(
+    'p90p10',
+    filters={'property': 'stoiip'},
+    case_selection=True,
+    selection_criteria=selection_criteria
+)
 ```
 
-### Handling Errors
+### Custom Statistical Options
 
 ```python
-results = processor.compute_batch(
-    stats="p90p10",
-    parameters="all",
-    filters={"property": "STOIIP"},
-    options={"skip": ["errors"]}  # Hide error messages
+# Compute arbitrary percentile
+result = processor.compute(
+    'percentile',
+    filters={'property': 'stoiip'},
+    options={'p': 75}  # P75
 )
 
-# Check for errors in results
-for result in results:
-    if "errors" in result:
-        print(f"Parameter {result['parameter']} had errors: {result['errors']}")
-    elif "p90p10" in result:
-        print(f"Parameter {result['parameter']}: P90/P10 = {result['p90p10']}")
+# Skip certain outputs
+result = processor.compute(
+    'mean',
+    filters={'property': 'stoiip'},
+    options={'skip': ['sources', 'errors'], 'decimals': 2}
+)
 ```
-
-### Performance Tips
-
-1. **Use batch processing** for multiple parameters:
-   ```python
-   # Good: Single call for all parameters
-   results = processor.compute_batch(stats="p90p10", parameters="all", ...)
-
-   # Avoid: Multiple calls
-   for param in parameters:
-       result = processor.compute(stats="p90p10", parameter=param, ...)
-   ```
-
-2. **Skip unnecessary data**:
-   ```python
-   options = {
-       "skip": ["sources", "errors"],  # Reduces memory usage
-   }
-   ```
-
-3. **Set appropriate thresholds**:
-   ```python
-   options = {
-       "p90p10_threshold": 150,  # Require minimum cases for reliable statistics
-   }
-   ```
-
-## Excel File Format
-
-TornadoPy expects Excel files with the following structure:
-
-```
-[Info rows - optional metadata]
-Header Row 1    | Dynamic Field 1 | Dynamic Field 1 | ...
-Header Row 2    | Value A         | Value B         | ...
-Case            | Property 1      | Property 2      | ...
-1               | 123.45          | 67.89           | ...
-2               | 234.56          | 78.90           | ...
-...
-```
-
-- Multiple header rows are supported and will be combined
-- The "Case" row marks the start of data
-- Dynamic fields in column A define metadata columns
-- Property names are extracted from the last header row
 
 ## API Reference
 
 ### TornadoProcessor
 
-#### Initialization
+**Initialization:**
+- `TornadoProcessor(filepath, multiplier=1.0, base_case=None)`
 
-```python
-TornadoProcessor(
-    filepath: str,
-    multiplier: float = 1.0,
-    base_case: str = None
-)
-```
-
-**Parameters:**
-- `filepath`: Path to Excel file (.xlsx, .xlsb, etc.)
-- `multiplier`: Default multiplier to apply to all operations (default: 1.0)
-- `base_case`: Name of sheet containing base/reference case data (optional)
-
-#### Core Methods
-
-**Information Access:**
-- `parameters()`: Get list of available parameters (sheet names)
-- `properties(parameter=None)`: Get available properties for a parameter
-- `unique(field, parameter=None)`: Get unique values for a dynamic field
-- `info(parameter=None)`: Get metadata for a parameter
-- `case(index, parameter=None)`: Get data for a specific case
+**Data Exploration:**
+- `parameters()` - List all parameter names
+- `properties(parameter=None)` - List properties for a parameter
+- `unique_values(field, parameter=None)` - Get unique values for a field
+- `info(parameter=None)` - Get metadata for a parameter
+- `case(index, parameter=None)` - Get data for a specific case
 
 **Statistics:**
-- `compute(stats, parameter=None, filters=None, multiplier=None, options=None, case_selection=False, selection_criteria=None)`: Compute statistics
-- `compute_batch(stats, parameters, filters=None, multiplier=None, options=None, case_selection=False, selection_criteria=None)`: Batch compute for multiple parameters
-- `distribution(parameter=None, filters=None, multiplier=None, options=None)`: Get distribution data
-- `get_tornado_data(parameters, filters=None, multiplier=None, options=None)`: Get tornado chart formatted data
+- `compute(stats, parameter=None, filters=None, multiplier=None, options=None, case_selection=False, selection_criteria=None)`
+- `compute_batch(stats, parameters='all', filters=None, multiplier=None, options=None, ...)`
+- `tornado(filters=None, multiplier=None, skip=None, options=None, ...)` - Convenience method
+- `distribution(parameter=None, filters=None, multiplier=None, options=None)` - Convenience method
 
-**Filter Management (NEW):**
-- `set_filter(name, filters)`: Store a named filter preset
-- `get_filter(name)`: Retrieve a stored filter preset
-- `list_filters()`: List all stored filter names
+**Base Cases:**
+- `base_case(property=None, filters=None, multiplier=None)` - Get base case value(s)
+- `ref_case(property=None, filters=None, multiplier=None)` - Get reference case value(s)
 
-**Base/Reference Case (NEW):**
-- `base_case(parameter=None, filters=None, multiplier=None)`: Extract base case values (index 0)
-- `ref_case(parameter=None, filters=None, multiplier=None)`: Extract reference case values (index 1)
-- `base_case_values`: Property containing cached base case values (dict)
-- `reference_case_values`: Property containing cached reference case values (dict)
+**Filters:**
+- `set_filter(name, filters)` - Store a filter preset
+- `get_filter(name)` - Retrieve a filter preset
+- `list_filters()` - List all filter presets
 
-#### Legacy Methods (Deprecated but still supported)
+### Plotting Functions
 
-For backwards compatibility, the following methods still work but are deprecated:
-- `get_parameters()` → use `parameters()`
-- `get_properties()` → use `properties()`
-- `get_unique()` → use `unique()`
-- `get_distribution()` → use `distribution()`
-- `get_info()` → use `info()`
-- `get_case()` → use `case()`
-
-### tornado_plot
-
-#### Parameters
-
-- `sections`: List of section dictionaries with parameter data
-- `title`: Chart title
-- `subtitle`: Chart subtitle
-- `outfile`: Output file path
-- `base`: Base case value
-- `reference_case`: Reference case line value
-- `unit`: Unit label
-- `preferred_order`: List of parameter names for custom ordering
-- `settings`: Dictionary of visual settings
-
-#### Returns
-
-- `fig`: Matplotlib figure object
-- `ax`: Matplotlib axes object
-- `saved`: Path to saved file (if outfile specified)
-
-### distribution_plot
-
-#### Parameters
-
-- `data`: Array-like data (numpy array, list, or from get_distribution)
-- `title`: Chart title (default "Distribution")
-- `unit`: Unit label for x-axis and subtitle
-- `outfile`: Output file path (if specified, saves the figure)
-- `target_bins`: Target number of bins for histogram (default 20)
-- `color`: Color scheme - "red", "blue", "green", "orange", "purple", "fuchsia", "yellow"
-- `reference_case`: Optional reference case value to plot as vertical line
-- `settings`: Dictionary of visual settings to override defaults
-
-#### Settings Options
-
-Common settings for customizing distribution plots:
-
+**tornado_plot:**
 ```python
-settings = {
-    # Layout
-    "figsize": (10, 6),
-    "dpi": 160,
-
-    # Percentile markers
-    "show_percentile_markers": True,  # Show P90/P50/P10 on cumulative curve
-    "marker_size": 8,
-
-    # Grid customization
-    "show_minor_grid": True,
-    "x_major_interval": 5,   # Major x-gridlines every 5 units
-    "x_minor_interval": 1,   # Minor x-gridlines every 1 unit
-    "y_major_interval": 50,  # Major y-gridlines every 50 frequency
-    "y_minor_interval": 10,  # Minor y-gridlines every 10 frequency
-
-    # Font sizes
-    "title_fontsize": 15,
-    "subtitle_fontsize": 11,
-    "label_fontsize": 10,
-}
+tornado_plot(sections, title="Tornado Chart", subtitle=None, outfile=None,
+             base=None, reference_case=None, unit=None,
+             preferred_order=None, settings=None)
 ```
 
-#### Returns
-
-- `fig`: Matplotlib figure object
-- `ax`: Matplotlib axes object (primary)
-- `saved`: Path to saved file (if outfile specified)
+**distribution_plot:**
+```python
+distribution_plot(data, title="Distribution", unit=None, outfile=None,
+                  target_bins=20, color="blue", reference_case=None,
+                  settings=None)
+```
 
 ## Requirements
 
@@ -780,12 +622,16 @@ settings = {
 
 ## License
 
-MIT License - see LICENSE file for details
+MIT License - see LICENSE file for details.
 
 ## Contributing
 
 Contributions are welcome! Please feel free to submit a Pull Request.
 
-## Support
+## Issues
 
-For issues and questions, please open an issue on GitHub.
+Report issues at: https://github.com/kkollsga/tornadopy/issues
+
+## Author
+
+Kristian dF Kollsgård (kkollsg@gmail.com)
