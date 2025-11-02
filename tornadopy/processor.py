@@ -1,4 +1,5 @@
 import re
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, List, Tuple, Union
 
@@ -15,6 +16,26 @@ class TornadoProcessor:
             filepath: Path to Excel file
             multiplier: Default multiplier to apply to all operations (default 1.0)
             base_case: Name of sheet containing base/reference case data
+            
+        Attributes:
+            default_multiplier: Default multiplier for all operations
+            default_variables: Default list of variables to include in case() and case_variables() 
+                              calls when variables=True (default None = all variables). Set this
+                              to filter which variables are returned by default. The $ prefix is
+                              optional - both 'NPV' and '$NPV' work the same.
+            stored_filters: Dictionary of named filter presets
+            base_case_parameter: Name of base case sheet
+            
+        Examples:
+            # Initialize with default multiplier
+            processor = TornadoProcessor('data.xlsx', multiplier=1e-6)
+            
+            # Set default variables to filter ($ prefix optional)
+            processor.default_variables = ['NPV', 'Recovery', 'EUR']
+            
+            # Now case() with variables=True will only return these variables
+            case_data = processor.case('p10.NTG_42', variables=True)
+            # Returns: {'variables': {'NPV': 123.4, 'Recovery': 0.45, 'EUR': 89.2}}
         """
         self.filepath = Path(filepath)
         if not self.filepath.exists():
@@ -31,6 +52,7 @@ class TornadoProcessor:
         self.dynamic_fields: Dict[str, List[str]] = {}
         self.default_multiplier: float = multiplier
         self.stored_filters: Dict[str, Dict[str, Any]] = {}
+        self.default_variables: List[str] = None
         self.base_case_parameter: str = base_case
         self.base_case_values: Dict[str, float] = {}
         self.reference_case_values: Dict[str, float] = {}
@@ -46,6 +68,54 @@ class TornadoProcessor:
                 self._extract_base_and_reference_cases()
             except Exception as e:
                 print(f"[!] Warning: failed to extract base/reference case from '{base_case}': {e}")
+    
+    # ================================================================
+    # UTILITY HELPERS
+    # ================================================================
+    
+    def _to_float(self, value: Any, decimals: int = None) -> float:
+        """Convert value to native Python float with optional rounding.
+        
+        Args:
+            value: Value to convert (can be numpy type, int, float, etc.)
+            decimals: Optional number of decimal places to round to
+            
+        Returns:
+            Native Python float, or None if value is None
+        """
+        if value is None:
+            return None
+        val = float(value)
+        return round(val, decimals) if decimals is not None else val
+    
+    def _normalize_variable_name(self, var_name: str) -> str:
+        """Ensure variable name has $ prefix.
+        
+        Args:
+            var_name: Variable name with or without $ prefix
+            
+        Returns:
+            Variable name with $ prefix
+            
+        Examples:
+            _normalize_variable_name('NPV') -> '$NPV'
+            _normalize_variable_name('$NPV') -> '$NPV'
+        """
+        return var_name if var_name.startswith('$') else f'${var_name}'
+    
+    def _strip_variable_prefix(self, variables_dict: Dict[str, Any]) -> Dict[str, Any]:
+        """Remove $ prefix from variable names in dict.
+        
+        Args:
+            variables_dict: Dictionary with $ prefixed keys
+            
+        Returns:
+            Dictionary with $ stripped from keys
+            
+        Examples:
+            {'$NPV': 123.4} -> {'NPV': 123.4}
+        """
+        return {k.lstrip('$'): v for k, v in variables_dict.items()}
     
     # ================================================================
     # INITIALIZATION & PARSING
@@ -264,6 +334,72 @@ class TornadoProcessor:
             filters=filters,
             multiplier=self.default_multiplier
         )
+    
+    # ================================================================
+    # CASE REFERENCE MANAGEMENT
+    # ================================================================
+    
+    def _create_case_reference(self, parameter: str, index: int, tag: str = None) -> str:
+        """Create a unique reference string for a case.
+        
+        Args:
+            parameter: Parameter name
+            index: Case index
+            tag: Optional tag prefix (e.g., 'p10', 'p90', 'mean')
+            
+        Returns:
+            Reference string in format "tag.parameter_index" if tag provided,
+            otherwise "parameter_index"
+            
+        Examples:
+            _create_case_reference('NTG', 42) -> 'NTG_42'
+            _create_case_reference('NTG', 42, 'p10') -> 'p10.NTG_42'
+        """
+        base_ref = f"{parameter}_{index}"
+        return f"{tag}.{base_ref}" if tag else base_ref
+    
+    def _parse_case_reference(self, reference: str) -> Tuple[str, int, str]:
+        """Parse a case reference string into parameter, index, and optional tag.
+        
+        Searches from right to find first underscore separator, allowing
+        parameter names to contain underscores. If a dot prefix exists,
+        treats it as a tag.
+        
+        Args:
+            reference: Case reference string (e.g., "NTG_42" or "p10.NTG_42")
+            
+        Returns:
+            Tuple of (parameter_name, case_index, tag)
+            tag will be None if no prefix present
+            
+        Raises:
+            ValueError: If reference format is invalid
+            
+        Examples:
+            _parse_case_reference('NTG_42') -> ('NTG', 42, None)
+            _parse_case_reference('p10.NTG_42') -> ('NTG', 42, 'p10')
+            _parse_case_reference('p10.NET_TO_GROSS_42') -> ('NET_TO_GROSS', 42, 'p10')
+        """
+        # Check for tag prefix
+        tag = None
+        if '.' in reference:
+            tag, reference = reference.split('.', 1)
+        
+        # Find the last underscore
+        last_underscore = reference.rfind('_')
+        if last_underscore == -1:
+            raise ValueError(f"Invalid case reference format: {reference}")
+        
+        parameter = reference[:last_underscore]
+        try:
+            index = int(reference[last_underscore + 1:])
+        except ValueError:
+            raise ValueError(
+                f"Invalid case reference format: {reference} "
+                "(index portion must be numeric)"
+            )
+        
+        return parameter, index, tag
     
     # ================================================================
     # FILTER MANAGEMENT
@@ -593,6 +729,48 @@ class TornadoProcessor:
         
         return total_distances, metadata
     
+    def _get_case_reference_info(
+        self,
+        index: int,
+        parameter: str,
+        case_type: str = None,
+        weights: Dict[str, float] = None,
+        weighted_distance: float = None,
+        selection_values: Dict[str, float] = None,
+        selection_method: str = "weighted"
+    ) -> Dict:
+        """Create a lightweight case reference info dictionary.
+        
+        Args:
+            index: Case index
+            parameter: Parameter name
+            case_type: Type of case (e.g., 'p10', 'p90', 'mean', 'min', 'max')
+            weights: Weights used for selection
+            weighted_distance: Distance metric for weighted selection
+            selection_values: Values used in selection
+            selection_method: Method used for selection
+            
+        Returns:
+            Dictionary with case reference and metadata (simplified format)
+        """
+        # Create reference with tag if case_type provided
+        reference = self._create_case_reference(parameter, index, tag=case_type)
+        
+        info = {
+            "reference": reference
+        }
+        
+        if weights:
+            info["weights"] = weights
+        if weighted_distance is not None:
+            info["weighted_distance"] = weighted_distance
+        if selection_values:
+            info["selection_values"] = selection_values
+        if selection_method:
+            info["selection_method"] = selection_method
+            
+        return info
+    
     def _find_closest_cases(
         self,
         property_values: Dict[str, np.ndarray],
@@ -601,7 +779,8 @@ class TornadoProcessor:
         resolved: str,
         filters: Dict[str, Any],
         multiplier: float,
-        decimals: int
+        decimals: int,
+        return_references: bool = True
     ) -> List[Dict]:
         """Find closest cases to targets using weighted distance.
         
@@ -613,9 +792,10 @@ class TornadoProcessor:
             filters: Applied filters
             multiplier: Applied multiplier
             decimals: Number of decimal places
+            return_references: If True, return lightweight references; if False, return full details
             
         Returns:
-            List of case detail dictionaries
+            List of case detail dictionaries or reference dictionaries
         """
         closest_cases = []
         first_prop = list(property_values.keys())[0]
@@ -624,28 +804,134 @@ class TornadoProcessor:
             distances = self._calculate_weighted_distance(property_values, case_targets, weights)
             idx = np.argmin(distances)
             
-            case_details = self._get_case_details(
-                int(idx), resolved, filters, multiplier,
-                property_values[first_prop][idx], decimals
-            )
-            case_details["case"] = case_type
-            case_details["weights"] = weights
-            case_details["weighted_distance"] = round(distances[idx], decimals)
+            if return_references:
+                # Return lightweight reference with compact format
+                selection_values = {}
+                for prop in weights.keys():
+                    if prop in property_values:
+                        # Use 'actual' for the case value
+                        selection_values[f"{prop}_actual"] = self._to_float(property_values[prop][idx], decimals)
+                        if prop in case_targets:
+                            # Use case type as prefix for target (e.g., 'p90', 'mean')
+                            selection_values[f"{prop}_{case_type}"] = self._to_float(case_targets[prop], decimals)
+                
+                case_info = self._get_case_reference_info(
+                    int(idx),
+                    resolved,
+                    case_type=case_type,
+                    weights=weights,
+                    weighted_distance=self._to_float(distances[idx], decimals),
+                    selection_values=selection_values,
+                    selection_method="weighted"
+                )
+            else:
+                # Return full details
+                case_info = self._get_case_details(
+                    int(idx), resolved, filters, multiplier,
+                    property_values[first_prop][idx], decimals
+                )
+                case_info["case"] = case_type
+                case_info["weights"] = weights
+                case_info["weighted_distance"] = self._to_float(distances[idx], decimals)
+                
+                # Add selection_values showing actual values and targets for this case
+                selection_values = {}
+                for prop in weights.keys():
+                    if prop in property_values:
+                        selection_values[f"{prop}_actual"] = self._to_float(property_values[prop][idx], decimals)
+                        if prop in case_targets:
+                            selection_values[f"{prop}_{case_type}"] = self._to_float(case_targets[prop], decimals)
+                case_info["selection_values"] = selection_values
             
-            # Add selection_values showing actual values and targets for this case
-            selection_values = {}
-            for prop in weights.keys():
-                if prop in property_values:
-                    # Add actual case value
-                    selection_values[prop] = round(property_values[prop][idx], decimals)
-                    # Add target value
-                    if prop in case_targets:
-                        selection_values[f"{case_type}_{prop}"] = round(case_targets[prop], decimals)
-            case_details["selection_values"] = selection_values
-            
-            closest_cases.append(case_details)
+            closest_cases.append(case_info)
         
         return closest_cases
+    
+    def _parse_case_to_hierarchy(
+        self,
+        case_data: Dict,
+        parameter: str,
+        decimals: int = 6
+    ) -> Dict:
+        """Parse flat case data into hierarchical structure based on multi-headers.
+        
+        Converts column names like "Cerisa_giip (in oil)" into nested structure:
+        {
+            'giip (in oil)': 2648.0,  # Aggregated across all zones
+            'Cerisa': {
+                'giip (in oil)': 2648.0
+            }
+        }
+        
+        Args:
+            case_data: Flat dictionary with column names as keys
+            parameter: Parameter name for accessing metadata
+            decimals: Decimal places for rounding
+            
+        Returns:
+            Hierarchical dictionary organized by dynamic fields and properties
+        """
+        if parameter not in self.metadata or self.metadata[parameter].is_empty():
+            return {}
+        
+        metadata = self.metadata[parameter]
+        dynamic_field_names = self.dynamic_fields.get(parameter, [])
+        
+        # Structure to hold results
+        properties_agg = {}  # Top level: aggregated by property
+        hierarchy = {}  # Nested: by dynamic fields
+        
+        # Single pass through metadata - build both aggregation and hierarchy
+        for row in metadata.iter_rows(named=True):
+            col_name = row['column_name']
+            prop = row['property']
+            
+            # Skip if column not in case data
+            if col_name not in case_data:
+                continue
+                
+            value = case_data[col_name]
+            
+            # Convert to float if needed using helper
+            if value is not None:
+                try:
+                    value = self._to_float(value, decimals)
+                except (TypeError, ValueError):
+                    pass
+            
+            # Add to property aggregation (sum)
+            if value is not None and isinstance(value, (int, float)):
+                if prop not in properties_agg:
+                    properties_agg[prop] = 0.0
+                properties_agg[prop] += value
+            
+            # Build path through dynamic fields for hierarchy
+            path_parts = []
+            for field_name in dynamic_field_names:
+                field_value = row.get(field_name)
+                if field_value is not None and field_value != '':
+                    path_parts.append(str(field_value))
+            
+            # If we have a path (zone, region, etc.), create nested structure
+            if path_parts:
+                # Navigate/create nested structure
+                current_level = hierarchy
+                for part in path_parts:
+                    if part not in current_level:
+                        current_level[part] = {}
+                    current_level = current_level[part]
+                
+                # Set the property value at the deepest level
+                current_level[prop] = value
+        
+        # Round aggregated properties
+        if decimals is not None:
+            properties_agg = {k: self._to_float(v, decimals) for k, v in properties_agg.items()}
+        
+        # Merge: top-level aggregated properties + hierarchical breakdown
+        result = {**properties_agg, **hierarchy}
+        
+        return result
     
     def _get_case_details(
         self,
@@ -656,20 +942,23 @@ class TornadoProcessor:
         value: float,
         decimals: int = 6
     ) -> Dict:
-        """Extract detailed information for a specific case.
+        """Extract detailed information for a specific case with filters applied.
         
         Args:
             index: Case index
             parameter: Parameter name
-            filters: Applied filters
+            filters: Applied filters (zones, properties, etc.)
             multiplier: Applied multiplier
-            value: Computed value for this case (already with multiplier applied)
+            value: Computed value for main property (can be None, will be calculated)
             decimals: Number of decimal places for rounding
             
         Returns:
-            Dictionary with case details including idx, property value, filters, multiplier, properties, and variables
+            Dictionary with case details including idx, property values (filtered), 
+            filters, multiplier, and properties (hierarchical with filters applied).
+            Variables are included with $ stripped from keys.
         """
-        case_data = self.case(index, parameter=parameter)
+        # Get raw case data without filtering (internal call)
+        case_data = self.case(index, parameter=parameter, _skip_filtering=True)
         
         # Get all available properties for this parameter
         try:
@@ -677,35 +966,58 @@ class TornadoProcessor:
         except:
             all_properties = []
         
-        # Calculate all property values for this case WITHOUT multiplier
-        properties_dict = {}
-        non_property_filters = {k: v for k, v in filters.items() if k != "property"}
+        # Extract variables and strip $ prefix
+        variables_raw = {k: v for k, v in case_data.items() if k.startswith("$")}
+        variables_dict = self._strip_variable_prefix(variables_raw)
         
-        for prop in all_properties:
-            try:
-                prop_filters = {**non_property_filters, "property": prop}
-                values, _ = self._extract_values(parameter, prop_filters, multiplier=1.0)  # No multiplier
-                if index < len(values):
-                    properties_dict[prop] = round(values[index], decimals)
-            except:
-                # Skip properties that can't be calculated
-                pass
-        
-        # Handle property filter - if it's a list, use first property; if string, use it
-        property_filter = filters.get("property")
-        if isinstance(property_filter, list):
-            property_key = property_filter[0] if property_filter else "value"
+        # If filters provided, calculate each property with filters applied
+        # Otherwise just parse the hierarchy from raw data
+        if filters:
+            properties_dict = {}
+            non_property_filters = {k: v for k, v in filters.items() if k != "property"}
+            
+            # Calculate all properties with the given filters for this specific case
+            for prop in all_properties:
+                try:
+                    prop_filters = {**non_property_filters, "property": prop}
+                    values, _ = self._extract_values(parameter, prop_filters, multiplier)
+                    if index < len(values):
+                        properties_dict[prop] = self._to_float(values[index], decimals)
+                except:
+                    # Skip properties that can't be calculated
+                    pass
+            
+            # Handle property filter to determine main key
+            property_filter = filters.get("property")
+            if isinstance(property_filter, list):
+                property_key = property_filter[0] if property_filter else "value"
+            else:
+                property_key = property_filter if property_filter else "value"
+            
+            # Get or calculate main value
+            if value is None and property_key in properties_dict:
+                main_value = properties_dict[property_key]
+            else:
+                main_value = self._to_float(value, decimals)
+            
+            details = {
+                "idx": index,
+                **{property_key: main_value},
+                **{k: v for k, v in filters.items() if k != "property"},
+                "multiplier": multiplier,
+                "properties": properties_dict,
+                "variables": variables_dict
+            }
         else:
-            property_key = property_filter if property_filter else "value"
-        
-        details = {
-            "idx": index,
-            **{property_key: round(value, decimals)},
-            **{k: v for k, v in filters.items() if k != "property"},
-            "multiplier": multiplier,
-            "properties": properties_dict,
-            "variables": {k: v for k, v in case_data.items() if k.startswith("$")}
-        }
+            # No filters - just parse hierarchy from raw case data
+            properties_dict = self._parse_case_to_hierarchy(case_data, parameter, decimals)
+            
+            details = {
+                "idx": index,
+                "multiplier": multiplier,
+                "properties": properties_dict,
+                "variables": variables_dict
+            }
         
         return details
     
@@ -737,7 +1049,6 @@ class TornadoProcessor:
             Dict with computed statistics
         """
         result = {}
-        _round = lambda x: round(x, decimals)
         threshold = options.get("p90p10_threshold", 10)
         
         # For single property, we'll store results directly
@@ -753,18 +1064,18 @@ class TornadoProcessor:
             for stat in stats:
                 try:
                     if stat == 'mean':
-                        prop_stats['mean'] = _round(float(np.mean(values)))
+                        prop_stats['mean'] = self._to_float(np.mean(values), decimals)
                     
                     elif stat == 'median':
-                        prop_stats['median'] = _round(float(np.median(values)))
+                        prop_stats['median'] = self._to_float(np.median(values), decimals)
                     
                     elif stat == 'std':
-                        prop_stats['std'] = _round(float(np.std(values)))
+                        prop_stats['std'] = self._to_float(np.std(values), decimals)
                     
                     elif stat == 'cv':
                         mean_val = np.mean(values)
                         if abs(mean_val) > 1e-10:  # Avoid division by zero
-                            prop_stats['cv'] = _round(float(np.std(values) / mean_val))
+                            prop_stats['cv'] = self._to_float(np.std(values) / mean_val, decimals)
                         else:
                             prop_stats['cv'] = None
                     
@@ -772,17 +1083,17 @@ class TornadoProcessor:
                         prop_stats['count'] = len(values)
                     
                     elif stat == 'sum':
-                        prop_stats['sum'] = _round(float(np.sum(values)))
+                        prop_stats['sum'] = self._to_float(np.sum(values), decimals)
                     
                     elif stat == 'variance':
-                        prop_stats['variance'] = _round(float(np.var(values)))
+                        prop_stats['variance'] = self._to_float(np.var(values), decimals)
                     
                     elif stat == 'range':
-                        prop_stats['range'] = _round(float(np.max(values) - np.min(values)))
+                        prop_stats['range'] = self._to_float(np.max(values) - np.min(values), decimals)
                     
                     elif stat == 'minmax':
-                        min_val = _round(float(np.min(values)))
-                        max_val = _round(float(np.max(values)))
+                        min_val = self._to_float(np.min(values), decimals)
+                        max_val = self._to_float(np.max(values), decimals)
                         prop_stats['minmax'] = [min_val, max_val]
                     
                     elif stat == 'p90p10':
@@ -793,20 +1104,20 @@ class TornadoProcessor:
                                 )
                         else:
                             p10, p90 = np.percentile(values, [10, 90])
-                            prop_stats['p90p10'] = [_round(float(p10)), _round(float(p90))]
+                            prop_stats['p90p10'] = [self._to_float(p10, decimals), self._to_float(p90, decimals)]
                     
                     elif stat == 'p1p99':
                         p1, p99 = np.percentile(values, [1, 99])
-                        prop_stats['p1p99'] = [_round(float(p1)), _round(float(p99))]
+                        prop_stats['p1p99'] = [self._to_float(p1, decimals), self._to_float(p99, decimals)]
                     
                     elif stat == 'p25p75':
                         p25, p75 = np.percentile(values, [25, 75])
-                        prop_stats['p25p75'] = [_round(float(p25)), _round(float(p75))]
+                        prop_stats['p25p75'] = [self._to_float(p25, decimals), self._to_float(p75, decimals)]
                     
                     elif stat == 'percentile':
                         p = options.get('p', 50)
                         perc_val = np.percentile(values, p)
-                        prop_stats[f'p{p}'] = _round(float(perc_val))
+                        prop_stats[f'p{p}'] = self._to_float(perc_val, decimals)
                     
                     elif stat == 'distribution':
                         prop_stats['distribution'] = np.round(values, decimals)
@@ -867,7 +1178,8 @@ class TornadoProcessor:
         filters: Dict[str, Any],
         multiplier: float,
         skip: List[str],
-        decimals: int
+        decimals: int,
+        return_references: bool = True
     ) -> List[Dict]:
         """Perform case selection for computed statistics.
         
@@ -881,9 +1193,10 @@ class TornadoProcessor:
             multiplier: Applied multiplier
             skip: Skip list
             decimals: Decimal places
+            return_references: If True, return references; if False, return full details
             
         Returns:
-            List of closest case details
+            List of closest case details or references
         """
         _round = lambda x: round(x, decimals)
         closest_cases = []
@@ -907,24 +1220,42 @@ class TornadoProcessor:
                     
                     # P10 case
                     idx_p10 = np.argmin(distances_p10)
-                    case_p10 = self._get_case_details(
-                        int(idx_p10), resolved, filters, multiplier,
-                        property_values[first_prop][idx_p10], decimals
-                    )
-                    case_p10["case"] = "p10"
-                    case_p10["selection_method"] = "weighted_combinations"
-                    case_p10["weighted_distance"] = _round(distances_p10[idx_p10])
+                    if return_references:
+                        case_p10 = self._get_case_reference_info(
+                            int(idx_p10),
+                            resolved,
+                            case_type="p10",
+                            weighted_distance=self._to_float(distances_p10[idx_p10], decimals),
+                            selection_method="weighted_combinations"
+                        )
+                    else:
+                        case_p10 = self._get_case_details(
+                            int(idx_p10), resolved, filters, multiplier,
+                            property_values[first_prop][idx_p10], decimals
+                        )
+                        case_p10["case"] = "p10"
+                        case_p10["selection_method"] = "weighted_combinations"
+                        case_p10["weighted_distance"] = self._to_float(distances_p10[idx_p10], decimals)
                     closest_cases.append(case_p10)
                     
                     # P90 case
                     idx_p90 = np.argmin(distances_p90)
-                    case_p90 = self._get_case_details(
-                        int(idx_p90), resolved, filters, multiplier,
-                        property_values[first_prop][idx_p90], decimals
-                    )
-                    case_p90["case"] = "p90"
-                    case_p90["selection_method"] = "weighted_combinations"
-                    case_p90["weighted_distance"] = _round(distances_p90[idx_p90])
+                    if return_references:
+                        case_p90 = self._get_case_reference_info(
+                            int(idx_p90),
+                            resolved,
+                            case_type="p90",
+                            weighted_distance=self._to_float(distances_p90[idx_p90], decimals),
+                            selection_method="weighted_combinations"
+                        )
+                    else:
+                        case_p90 = self._get_case_details(
+                            int(idx_p90), resolved, filters, multiplier,
+                            property_values[first_prop][idx_p90], decimals
+                        )
+                        case_p90["case"] = "p90"
+                        case_p90["selection_method"] = "weighted_combinations"
+                        case_p90["weighted_distance"] = self._to_float(distances_p90[idx_p90], decimals)
                     closest_cases.append(case_p90)
             
             return closest_cases
@@ -947,22 +1278,38 @@ class TornadoProcessor:
                 
                 # Min case
                 idx_min = np.argmin(property_values[first_prop])
-                case_min = self._get_case_details(
-                    int(idx_min), resolved, filters, multiplier,
-                    property_values[first_prop][idx_min], decimals
-                )
-                case_min["case"] = "min"
-                case_min["selection_method"] = "exact"
+                if return_references:
+                    case_min = self._get_case_reference_info(
+                        int(idx_min),
+                        resolved,
+                        case_type="min",
+                        selection_method="exact"
+                    )
+                else:
+                    case_min = self._get_case_details(
+                        int(idx_min), resolved, filters, multiplier,
+                        property_values[first_prop][idx_min], decimals
+                    )
+                    case_min["case"] = "min"
+                    case_min["selection_method"] = "exact"
                 closest_cases.append(case_min)
                 
                 # Max case
                 idx_max = np.argmax(property_values[first_prop])
-                case_max = self._get_case_details(
-                    int(idx_max), resolved, filters, multiplier,
-                    property_values[first_prop][idx_max], decimals
-                )
-                case_max["case"] = "max"
-                case_max["selection_method"] = "exact"
+                if return_references:
+                    case_max = self._get_case_reference_info(
+                        int(idx_max),
+                        resolved,
+                        case_type="max",
+                        selection_method="exact"
+                    )
+                else:
+                    case_max = self._get_case_details(
+                        int(idx_max), resolved, filters, multiplier,
+                        property_values[first_prop][idx_max], decimals
+                    )
+                    case_max["case"] = "max"
+                    case_max["selection_method"] = "exact"
                 closest_cases.append(case_max)
             
             elif stat in ['mean', 'median', 'p90p10']:
@@ -994,7 +1341,8 @@ class TornadoProcessor:
         if targets:
             found_cases = self._find_closest_cases(
                 weighted_property_values, targets, weights,
-                resolved, filters, multiplier, decimals
+                resolved, filters, multiplier, decimals,
+                return_references=return_references
             )
             closest_cases.extend(found_cases)
         
@@ -1012,8 +1360,11 @@ class TornadoProcessor:
         """
         return list(self.data.keys())
     
+    @lru_cache(maxsize=128)
     def properties(self, parameter: str = None) -> List[str]:
         """Get list of unique properties for a parameter.
+        
+        Results are cached for performance.
         
         Args:
             parameter: Parameter name (defaults to first if only one)
@@ -1035,8 +1386,11 @@ class TornadoProcessor:
             .to_list()
         )
     
+    @lru_cache(maxsize=256)
     def unique_values(self, field: str, parameter: str = None) -> List[str]:
         """Get unique values for a dynamic field (e.g., zones, regions).
+        
+        Results are cached for performance.
         
         Args:
             field: Field name to get unique values for
@@ -1080,26 +1434,256 @@ class TornadoProcessor:
         resolved = self._resolve_parameter(parameter)
         return self.info.get(resolved, {})
     
-    def case(self, index: int, parameter: str = None) -> Dict:
-        """Get data for a specific case by index.
+    def case(
+        self, 
+        index_or_reference: Union[int, str], 
+        parameter: str = None,
+        filters: Union[Dict[str, Any], str] = None,
+        multiplier: float = None,
+        decimals: int = 6,
+        variables: Union[bool, List[str]] = False,
+        _skip_filtering: bool = False
+    ) -> Dict:
+        """Get data for a specific case by index or reference.
         
         Args:
-            index: Case index (row number, 0-based)
-            parameter: Parameter name (defaults to first if only one)
+            index_or_reference: Case index (int) or case reference string (e.g., 'NTG_42' or 'p10.NTG_42')
+            parameter: Parameter name (required if using index, ignored if using reference)
+            filters: Filters dict, stored filter name, or None. When provided, recalculates volumes
+                    based on filters (e.g., specific zones, regions). Use stored filter name to
+                    apply preset filters.
+            multiplier: Multiplier to apply (defaults to instance default_multiplier)
+            decimals: Number of decimal places for rounding
+            variables: Control variable inclusion (default False):
+                - False (default): No variables included
+                - True: Include variables filtered by default_variables (or all if default_variables is None)
+                - List[str]: Include only specified variables ($ prefix optional, e.g., ['NPV', 'Recovery'])
             
         Returns:
-            Dictionary of all values for that case
+            Dictionary of volumetric values for that case. If filters provided, properties are
+            recalculated based on those filters. By default only includes properties.
+            Variables are returned without $ prefix in keys.
+            If reference has a tag prefix (e.g., 'p10.NTG_42'), adds 'case' key to result.
             
         Raises:
             IndexError: If index out of range
+            ValueError: If reference format is invalid
+            
+        Examples:
+            # Get case by index (volumetrics only, all zones)
+            case_data = processor.case(42, parameter='NTG')
+            
+            # Get case with filters (recalculates volumes for specific zones)
+            case_data = processor.case(42, parameter='NTG', 
+                                      filters={'property': 'stoiip', 'zones': ['z1', 'z2']})
+            
+            # Use stored filter
+            processor.set_filter('north_zones', {'zones': ['z1', 'z2', 'z3']})
+            case_data = processor.case('p10.NTG_42', filters='north_zones')
+            
+            # Get case with variables ($ prefix optional, stripped in output)
+            processor.default_variables = ['NPV', 'Recovery']  # or ['$NPV', '$Recovery']
+            case_data = processor.case('p10.NTG_42', variables=True)
+            # Returns: {'variables': {'NPV': 123.4, 'Recovery': 0.45}}
+            
+            # Get case with specific variables and filters
+            case_data = processor.case('p10.NTG_42', 
+                                      filters={'property': 'stoiip'},
+                                      variables=['EUR', 'NPV'])
+            # Returns: {'variables': {'EUR': 89.2, 'NPV': 123.4}}
+            
+            # With custom multiplier
+            case_data = processor.case('NTG_42', 
+                                      filters='north_zones',
+                                      multiplier=1e-6)
         """
-        resolved = self._resolve_parameter(parameter)
+        tag = None
+        
+        # Resolve filter preset if string provided
+        if filters is not None:
+            filters = self._resolve_filter_preset(filters)
+        
+        # Determine if using index or reference
+        if isinstance(index_or_reference, str):
+            # Reference mode
+            param, index, tag = self._parse_case_reference(index_or_reference)
+        else:
+            # Index mode
+            index = index_or_reference
+            param = self._resolve_parameter(parameter)
+        
+        # Set defaults
+        if multiplier is None:
+            multiplier = self.default_multiplier
+        
+        # Check if we need to recalculate with filters
+        if filters and not _skip_filtering:
+            # Filters provided - recalculate all properties for this case
+            case_data = self._get_case_details(
+                index, param, filters, multiplier, None, decimals
+            )
+        else:
+            # No filters - return raw case data
+            df = self.data[param]
+            
+            if index < 0 or index >= len(df):
+                raise IndexError(f"Index {index} out of range (0–{len(df)-1})")
+            
+            case_data = df[index].to_dicts()[0]
+            
+            # For raw data without filters, still create hierarchical properties
+            if not _skip_filtering:
+                properties_dict = self._parse_case_to_hierarchy(case_data, param, decimals)
+                case_data = {
+                    'idx': index,
+                    'properties': properties_dict,
+                    **{k: v for k, v in case_data.items() if k.startswith('$')}
+                }
+        
+        # Add tag as 'case' key if present
+        if tag:
+            case_data['case'] = tag
+        
+        # Skip further filtering if this is an internal call
+        if _skip_filtering:
+            return case_data
+        
+        # Handle variables inclusion/filtering
+        if variables is False or variables is None:
+            # Remove all variables (default behavior)
+            if 'variables' in case_data:
+                del case_data['variables']
+            else:
+                # For index mode, remove $ prefixed keys
+                for k in list(case_data.keys()):
+                    if k.startswith('$'):
+                        del case_data[k]
+        elif variables is True:
+            # Include variables, filtered by default_variables if set
+            var_list = self.default_variables
+            if var_list is not None:
+                # Filter and strip $
+                self._filter_case_variables(case_data, var_list)
+            else:
+                # Include all variables, strip $ from keys
+                if 'variables' not in case_data:
+                    vars_dict = {k: v for k, v in case_data.items() if k.startswith('$')}
+                    for k in list(vars_dict.keys()):
+                        del case_data[k]
+                    case_data['variables'] = self._strip_variable_prefix(vars_dict)
+                else:
+                    # Already in variables dict, just strip $
+                    case_data['variables'] = self._strip_variable_prefix(case_data['variables'])
+        elif isinstance(variables, list):
+            # Include only specified variables
+            # First ensure variables are in 'variables' dict
+            if 'variables' not in case_data:
+                vars_dict = {k: v for k, v in case_data.items() if k.startswith('$')}
+                for k in list(vars_dict.keys()):
+                    del case_data[k]
+                case_data['variables'] = vars_dict
+            # Filter and strip $
+            self._filter_case_variables(case_data, variables)
+        
+        return case_data
+    
+    def _filter_case_variables(self, case_data: Dict, var_list: List[str]) -> None:
+        """Filter variables in case_data dict in-place and strip $ from keys.
+        
+        Args:
+            case_data: Case data dictionary to filter
+            var_list: List of variable names (with or without $ prefix)
+        """
+        # Normalize variable names (ensure $ prefix for checking)
+        normalized_vars = [self._normalize_variable_name(v) for v in var_list]
+        
+        if 'variables' in case_data:
+            # Reference mode: variables are in a 'variables' dict
+            filtered_variables = {
+                k: v for k, v in case_data['variables'].items()
+                if k in normalized_vars
+            }
+            # Strip $ prefix from keys in output
+            case_data['variables'] = self._strip_variable_prefix(filtered_variables)
+        else:
+            # Index mode: variables are directly in case_data with $ prefix
+            # Keep only requested variables, then strip $ and move to 'variables' dict
+            filtered_vars = {
+                k: v for k, v in case_data.items() 
+                if k.startswith('$') and k in normalized_vars
+            }
+            # Remove $ prefixed keys from case_data
+            for k in list(case_data.keys()):
+                if k.startswith('$'):
+                    del case_data[k]
+            # Add back as 'variables' dict without $ prefix
+            if filtered_vars:
+                case_data['variables'] = self._strip_variable_prefix(filtered_vars)
+    
+    def case_variables(
+        self,
+        index_or_reference: Union[int, str],
+        parameter: str = None,
+        variables: List[str] = None
+    ) -> Dict[str, Any]:
+        """Get only the variables for a specific case.
+        
+        Variable names in the returned dict will not have the $ prefix.
+        
+        Args:
+            index_or_reference: Case index (int) or case reference string (e.g., 'NTG_42' or 'p10.NTG_42')
+            parameter: Parameter name (required if using index, ignored if using reference)
+            variables: List of variable names to include (with or without $ prefix).
+                      If None, uses default_variables. If default_variables is also None, 
+                      returns all variables.
+            
+        Returns:
+            Dictionary with only variable values (keys without $ prefix)
+            
+        Examples:
+            # Get all variables
+            vars = processor.case_variables(42, parameter='NTG')
+            # Returns: {'NPV': 123.4, 'Recovery': 0.45, 'EUR': 89.2}
+            
+            # Get filtered variables (using default_variables)
+            processor.default_variables = ['NPV', 'Recovery']  # $ optional
+            vars = processor.case_variables('p10.NTG_42')
+            # Returns: {'NPV': 123.4, 'Recovery': 0.45}
+            
+            # Get specific variables ($ prefix optional)
+            vars = processor.case_variables('NTG_42', variables=['EUR', 'NPV'])
+            # Returns: {'EUR': 89.2, 'NPV': 123.4}
+        """
+        # Use default_variables if not specified
+        if variables is None:
+            variables = self.default_variables
+        
+        # Parse reference if string
+        if isinstance(index_or_reference, str):
+            param, index, tag = self._parse_case_reference(index_or_reference)
+            resolved = param
+        else:
+            index = index_or_reference
+            resolved = self._resolve_parameter(parameter)
+        
+        # Get raw case data
         df = self.data[resolved]
         
         if index < 0 or index >= len(df):
             raise IndexError(f"Index {index} out of range (0–{len(df)-1})")
         
-        return df[index].to_dicts()[0]
+        case_data = df[index].to_dicts()[0]
+        
+        # Extract only variables ($ prefixed keys)
+        all_variables = {k: v for k, v in case_data.items() if k.startswith('$')}
+        
+        # Filter if variable list provided (normalize names first)
+        if variables is not None:
+            normalized_vars = [self._normalize_variable_name(v) for v in variables]
+            all_variables = {k: v for k, v in all_variables.items() if k in normalized_vars}
+        
+        # Strip $ prefix from keys
+        return self._strip_variable_prefix(all_variables)
     
     # ================================================================
     # PUBLIC API - BASE & REFERENCE CASE
@@ -1244,7 +1828,8 @@ class TornadoProcessor:
         multiplier: float = None,
         options: Dict[str, Any] = None,
         case_selection: bool = False,
-        selection_criteria: Dict[str, Any] = None
+        selection_criteria: Dict[str, Any] = None,
+        return_case_references: bool = True
     ) -> Dict:
         """Compute statistics for a single parameter with filters.
 
@@ -1262,27 +1847,36 @@ class TornadoProcessor:
             selection_criteria: Criteria for selecting cases (only used if case_selection=True):
                 - weights: dict of property weights (e.g., {'stoiip': 0.6, 'giip': 0.4})
                 - combinations: list of filter+property combinations for complex weighting
+            return_case_references: If True (default), return lightweight references instead of full details
 
         Returns:
-            Dictionary with computed statistics and optionally closest_cases
+            Dictionary with computed statistics and optionally closest_cases (as references or full details)
             
         Examples:
             # Simple mean computation
             result = processor.compute('mean', filters={'property': 'stoiip'})
             
-            # Multiple stats with stored filter
-            result = processor.compute(['mean', 'p90p10'], filters='north_zones')
-            
-            # With custom multiplier
-            result = processor.compute('p90p10', filters='north_zones', multiplier=1e-6)
-            
-            # With case selection
+            # With case selection (returns references)
             result = processor.compute(
                 'mean',
                 filters={'property': 'stoiip'},
                 case_selection=True,
                 selection_criteria={'weights': {'stoiip': 0.6, 'giip': 0.4}}
             )
+            # result['closest_cases'] = [{'reference': 'mean.NTG_42', 'weights': {...}, ...}]
+            
+            # Get case details from reference
+            ref = result['closest_cases'][0]['reference']
+            case_data = processor.case(ref)  # Automatically includes 'case': 'mean'
+            
+            # Get full details instead of references
+            result = processor.compute(
+                'p90p10',
+                filters='north_zones',
+                case_selection=True,
+                return_case_references=False
+            )
+            # result['closest_cases'] = [{'idx': 42, 'properties': {...}, ...}]
         """
         resolved = self._resolve_parameter(parameter)
         
@@ -1370,7 +1964,8 @@ class TornadoProcessor:
                 filters,
                 multiplier,
                 skip,
-                decimals
+                decimals,
+                return_references=return_case_references
             )
             if closest_cases:
                 result["closest_cases"] = closest_cases
@@ -1395,7 +1990,8 @@ class TornadoProcessor:
         selection_criteria: Dict[str, Any] = None,
         include_base_case: bool = True,
         include_reference_case: bool = True,
-        sort_by_range: bool = True
+        sort_by_range: bool = True,
+        return_case_references: bool = True
     ) -> Union[Dict, List[Dict]]:
         """Compute statistics for multiple parameters.
 
@@ -1410,41 +2006,19 @@ class TornadoProcessor:
             include_base_case: If True, add base case values to results (default True)
             include_reference_case: If True, add reference case values to results (default True)
             sort_by_range: If True, sort by p90p10 or minmax range (default True)
+            return_case_references: If True (default), return references instead of full details
 
         Returns:
             List of result dictionaries (or single dict if only one parameter)
             
-        Notes:
-            When sort_by_range=True (default):
-            - Reference case always appears first
-            - Parameters sorted by p90-p10 delta (descending)
-            - Parameters without p90p10 use minmax delta
-            - Parameters without either appear last in original order
-            
         Examples:
-            # Compute for all parameters
-            results = processor.compute_batch('p90p10', filters='north_zones')
-            
-            # Compute for specific parameters
-            results = processor.compute_batch(
-                ['mean', 'p90p10'],
-                parameters=['param1', 'param2'],
-                filters={'property': 'stoiip'}
-            )
-            
-            # With custom multiplier
-            results = processor.compute_batch(
-                'mean',
-                filters='north_zones',
-                multiplier=1e-6
-            )
-            
-            # Disable sorting
+            # Compute for all parameters with case references
             results = processor.compute_batch(
                 'p90p10',
                 filters='north_zones',
-                sort_by_range=False
+                case_selection=True
             )
+            # results[0]['closest_cases'] = [{'reference': 'NTG_42', ...}]
         """
         # Resolve filter preset if string provided
         filters = self._resolve_filter_preset(filters)
@@ -1529,7 +2103,8 @@ class TornadoProcessor:
                     multiplier=multiplier,
                     options=options,
                     case_selection=case_selection,
-                    selection_criteria=selection_criteria
+                    selection_criteria=selection_criteria,
+                    return_case_references=return_case_references
                 )
                 results.append(result)
             except Exception as e:
@@ -1604,7 +2179,8 @@ class TornadoProcessor:
         selection_criteria: Dict[str, Any] = None,
         include_base_case: bool = True,
         include_reference_case: bool = True,
-        sort_by_range: bool = True
+        sort_by_range: bool = True,
+        return_case_references: bool = True
     ) -> Union[Dict, List[Dict]]:
         """Compute tornado chart statistics (minmax and p90p10) for all parameters.
         
@@ -1621,47 +2197,26 @@ class TornadoProcessor:
             include_base_case: Include base case values (default True)
             include_reference_case: Include reference case values (default True)
             sort_by_range: Sort by range (default True)
+            return_case_references: Return references instead of full details (default True)
             
         Returns:
             List of result dictionaries with minmax and p90p10 statistics for all parameters
             
         Examples:
-            # Simple tornado chart data
-            results = processor.tornado(filters={'property': 'stoiip'})
-            
-            # Skip sources in output
+            # Simple tornado with case references
             results = processor.tornado(
                 filters={'property': 'stoiip'},
-                skip='sources'
+                case_selection=True
             )
+            # results[0]['closest_cases'] = [
+            #     {'reference': 'p10.NTG_42', 'weights': {...}, ...},
+            #     {'reference': 'p90.NTG_158', 'weights': {...}, ...}
+            # ]
             
-            # Skip multiple fields
-            results = processor.tornado(
-                filters={'property': 'stoiip'},
-                skip=['sources', 'errors']
-            )
-            
-            # With custom multiplier and filters
-            results = processor.tornado(
-                filters='north_zones',
-                multiplier=1e-6,
-                skip='sources'
-            )
-            
-            # With case selection
-            results = processor.tornado(
-                filters={'property': 'stoiip'},
-                case_selection=True,
-                selection_criteria={'weights': {'stoiip': 0.6, 'giip': 0.4}},
-                skip=['sources', 'closest_case']
-            )
-            
-            # With additional options
-            results = processor.tornado(
-                filters={'property': 'stoiip'},
-                skip='sources',
-                options={'p90p10_threshold': 150, 'decimals': 2}
-            )
+            # Get case details from reference
+            p10_ref = results[0]['closest_cases'][0]['reference']
+            p10_details = processor.case(p10_ref)
+            # p10_details automatically includes 'case': 'p10'
         """
         # Merge skip into options
         merged_options = options.copy() if options else {}
@@ -1688,7 +2243,8 @@ class TornadoProcessor:
             selection_criteria=selection_criteria,
             include_base_case=include_base_case,
             include_reference_case=include_reference_case,
-            sort_by_range=sort_by_range
+            sort_by_range=sort_by_range,
+            return_case_references=return_case_references
         )
     
     def distribution(
@@ -1728,79 +2284,3 @@ class TornadoProcessor:
         )
 
         return result["distribution"]
-    
-    def tornado_data(
-        self,
-        parameters: Union[str, List[str]] = "all",
-        filters: Union[Dict[str, Any], str] = None,
-        multiplier: float = None,
-        options: Dict[str, Any] = None
-    ) -> Dict:
-        """Get tornado chart data (p90p10 ranges) formatted for easy plotting.
-
-        Returns a dictionary with parameter names as keys and their p90p10 ranges.
-
-        Args:
-            parameters: Parameters to include (default "all")
-            filters: Filters dict or stored filter name
-            multiplier: Override default multiplier
-            options: Options including skip list, p90p10_threshold (default 10), etc.
-
-        Returns:
-            Dictionary with structure:
-            {
-                'parameter_name': {
-                    'p10': value,
-                    'p90': value,
-                    'range': p90 - p10,
-                    'midpoint': (p90 + p10) / 2
-                },
-                ...
-            }
-            
-        Examples:
-            # Get tornado data for all parameters
-            data = processor.tornado_data(filters='my_zones')
-            
-            # Get tornado data with custom multiplier
-            data = processor.tornado_data(
-                filters={'property': 'stoiip'},
-                multiplier=1e-6
-            )
-        """
-        results = self.compute_batch(
-            stats='p90p10',
-            parameters=parameters,
-            filters=filters,
-            multiplier=multiplier,
-            options=options
-        )
-        
-        if not isinstance(results, list):
-            results = [results]
-        
-        tornado_data = {}
-        
-        for result in results:
-            param = result.get("parameter")
-            if "p90p10" in result and "errors" not in result:
-                p10, p90 = result["p90p10"]
-                
-                # Handle multi-property case
-                if isinstance(p10, dict):
-                    # Use first property for tornado display
-                    first_prop = list(p10.keys())[0]
-                    p10_val = p10[first_prop]
-                    p90_val = p90[first_prop]
-                else:
-                    p10_val = p10
-                    p90_val = p90
-                
-                tornado_data[param] = {
-                    'p10': p10_val,
-                    'p90': p90_val,
-                    'range': p90_val - p10_val,
-                    'midpoint': (p90_val + p10_val) / 2
-                }
-        
-        return tornado_data
