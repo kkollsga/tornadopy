@@ -64,8 +64,13 @@ class TornadoProcessor:
         self.base_case_values: Dict[str, float] = {}
         self.reference_case_values: Dict[str, float] = {}
         
+        # Performance optimization caches
+        self._extraction_cache: Dict[str, Tuple[np.ndarray, List[str]]] = {}  # Cache for _extract_values
+        self._column_selection_cache: Dict[str, Tuple[List[str], List[str]]] = {}  # Cache for _select_columns
+        
         # Property unit tracking for consistency validation
         self.property_units: Dict[str, str] = {}  # Maps property name -> unit string
+        self._unit_validation_done: bool = False  # Flag to skip redundant validation
         self.unit_shortnames: Dict[str, str] = {
             # Reservoir volume units
             '[*10^3 m3]': 'kcm',
@@ -137,10 +142,12 @@ class TornadoProcessor:
         """
         return {k.lstrip('$'): v for k, v in variables_dict.items()}
     
+    @lru_cache(maxsize=512)
     def _parse_property_unit(self, property_name: str) -> Tuple[str, str]:
         """Parse property name to extract unit suffix.
         
         Units are expected to be in square brackets at the end of the property name.
+        Cached for performance - same property names are parsed repeatedly.
         
         Args:
             property_name: Property name potentially with unit (e.g., "bulk volume[*10^3 m3]")
@@ -164,6 +171,9 @@ class TornadoProcessor:
     def _validate_property_unit(self, property_name: str, unit: str, sheet_name: str) -> None:
         """Validate property unit consistency across sheets.
         
+        Uses lazy validation - after first pass through all sheets, validation is skipped
+        for performance.
+        
         Args:
             property_name: Property name (without unit)
             unit: Unit string (e.g., "[*10^3 m3]")
@@ -174,6 +184,10 @@ class TornadoProcessor:
         """
         if not unit:
             # No unit provided, skip validation
+            return
+        
+        # Skip validation if already completed (performance optimization)
+        if self._unit_validation_done:
             return
         
         if property_name in self.property_units:
@@ -233,6 +247,36 @@ class TornadoProcessor:
             merged['property'] = property
             return merged
     
+    def _create_cache_key(self, parameter: str, filters: Dict[str, Any], *args) -> str:
+        """Create a hashable cache key from parameter, filters, and optional args.
+        
+        Args:
+            parameter: Parameter name
+            filters: Filters dictionary
+            *args: Additional arguments to include in key (e.g., multiplier)
+            
+        Returns:
+            String cache key suitable for dictionary lookup
+        """
+        import json
+        
+        # Sort filters for consistent ordering
+        sorted_filters = dict(sorted(filters.items()))
+        
+        # Convert lists to tuples for JSON serialization
+        json_filters = {}
+        for k, v in sorted_filters.items():
+            if isinstance(v, list):
+                json_filters[k] = tuple(v)
+            else:
+                json_filters[k] = v
+        
+        # Create key from parameter, filters, and args
+        key_parts = [parameter, json.dumps(json_filters, sort_keys=True)]
+        key_parts.extend(str(arg) for arg in args)
+        
+        return ":".join(key_parts)
+    
     # ================================================================
     # INITIALIZATION & PARSING
     # ================================================================
@@ -252,17 +296,23 @@ class TornadoProcessor:
         
         return sheets
     
+    @lru_cache(maxsize=256)
     def _normalize_fieldname(self, name: str) -> str:
-        """Normalize field name to lowercase with underscores."""
+        """Normalize field name to lowercase with underscores.
+        
+        Cached for performance - same field names are normalized repeatedly.
+        """
         name = str(name).strip().lower()
         name = re.sub(r"[^a-z0-9_]+", "_", name)
         name = re.sub(r"_+$", "", name)
         return name or "property"
     
+    @lru_cache(maxsize=512)
     def _strip_units(self, property_name: str) -> str:
         """Strip unit annotations from property name.
         
         Removes anything in square brackets at the end of the property name.
+        Cached for performance.
         
         Args:
             property_name: Property name possibly containing units (e.g., "bulk volume[*10^3 m3]")
@@ -390,6 +440,9 @@ class TornadoProcessor:
                 self.info[sheet_name] = info
             except Exception as e:
                 print(f"[!] Skipped sheet '{sheet_name}': {e}")
+        
+        # Mark unit validation as complete for performance optimization
+        self._unit_validation_done = True
     
     # ================================================================
     # BASE & REFERENCE CASE EXTRACTION
@@ -605,6 +658,45 @@ class TornadoProcessor:
         """
         return list(self.stored_filters.keys())
     
+    def clear_cache(self) -> Dict[str, int]:
+        """Clear all performance caches and return statistics.
+        
+        Useful for freeing memory or forcing recomputation. Caches are automatically
+        rebuilt on subsequent operations.
+        
+        Returns:
+            Dictionary with cache sizes before clearing
+            
+        Examples:
+            # Clear all caches and see what was cached
+            stats = processor.clear_cache()
+            print(f"Cleared {stats['extraction_cache']} extraction results")
+            print(f"Cleared {stats['column_selection_cache']} column selections")
+        """
+        stats = {
+            'extraction_cache': len(self._extraction_cache),
+            'column_selection_cache': len(self._column_selection_cache),
+        }
+        
+        self._extraction_cache.clear()
+        self._column_selection_cache.clear()
+        
+        # Also clear lru_cache decorators
+        self._normalize_fieldname.cache_clear()
+        self._parse_property_unit.cache_clear()
+        self._strip_units.cache_clear()
+        self._normalize_filters_cached.cache_clear()
+        
+        # Clear method caches if they exist
+        if hasattr(self.properties, 'cache_clear'):
+            self.properties.cache_clear()
+        if hasattr(self.unique_values, 'cache_clear'):
+            self.unique_values.cache_clear()
+        
+        stats['lru_caches_cleared'] = True
+        
+        return stats
+    
     def get_property_units(self) -> Dict[str, str]:
         """Get dictionary of property-to-unit mappings.
         
@@ -635,8 +727,17 @@ class TornadoProcessor:
             return list(self.data.keys())[0]
         return parameter
     
-    def _normalize_filters(self, filters: Dict[str, Any]) -> Dict[str, Any]:
-        """Normalize filter keys and string values to lowercase."""
+    @lru_cache(maxsize=512)
+    def _normalize_filters_cached(self, filters_tuple: tuple) -> tuple:
+        """Cached version of _normalize_filters that works with tuples.
+        
+        Args:
+            filters_tuple: Tuple of (key, value) pairs from filters dict
+            
+        Returns:
+            Tuple of normalized (key, value) pairs
+        """
+        filters = dict(filters_tuple)
         normalized = {}
         
         for key, value in filters.items():
@@ -645,18 +746,52 @@ class TornadoProcessor:
             if isinstance(value, str):
                 value_norm = value.strip().lower()
             elif isinstance(value, list):
-                value_norm = [v.strip().lower() if isinstance(v, str) else v for v in value]
+                value_norm = tuple(v.strip().lower() if isinstance(v, str) else v for v in value)
             else:
                 value_norm = value
             
             normalized[key_norm] = value_norm
         
-        return normalized
+        return tuple(sorted(normalized.items()))
+    
+    def _normalize_filters(self, filters: Dict[str, Any]) -> Dict[str, Any]:
+        """Normalize filter keys and string values to lowercase.
+        
+        Uses caching internally for performance.
+        """
+        if not filters:
+            return {}
+        
+        # Convert to tuple for caching
+        filters_tuple = tuple(sorted(filters.items()))
+        normalized_tuple = self._normalize_filters_cached(filters_tuple)
+        
+        # Convert back to dict, handling tuples back to lists
+        result = {}
+        for key, value in normalized_tuple:
+            if isinstance(value, tuple) and key in filters and isinstance(filters[key], list):
+                # Convert tuple back to list if original was list
+                result[key] = list(value)
+            else:
+                result[key] = value
+        
+        return result
     
     def _select_columns(self, parameter: str, filters: Dict[str, Any]) -> Tuple[List[str], List[str]]:
-        """Select columns matching filters and return column names and sources."""
+        """Select columns matching filters and return column names and sources.
+        
+        Uses caching for performance - identical filter combinations return cached results.
+        """
+        # Check cache first
+        cache_key = self._create_cache_key(parameter, filters)
+        if cache_key in self._column_selection_cache:
+            return self._column_selection_cache[cache_key]
+        
+        # Cache miss - compute result
         if parameter not in self.metadata or self.metadata[parameter].is_empty():
-            return [], []
+            result = ([], [])
+            self._column_selection_cache[cache_key] = result
+            return result
         
         metadata = self.metadata[parameter]
         filters_norm = self._normalize_filters(filters)
@@ -685,115 +820,74 @@ class TornadoProcessor:
             raise ValueError(f"No columns match filters: {filter_desc}")
         
         column_names = matched.select("column_name").to_series().to_list()
-        return column_names, column_names
+        result = (column_names, column_names)
+        
+        # Cache the result
+        self._column_selection_cache[cache_key] = result
+        return result
     
     def _extract_values(
         self,
         parameter: str,
         filters: Dict[str, Any],
         multiplier: float = 1.0
-    ) -> Tuple[np.ndarray, Dict[str, Any]]:
+    ) -> Tuple[np.ndarray, List[str]]:
         """Extract and sum values for columns matching filters.
         
-        Returns:
-            Tuple of (values array, structured filters dict showing what was actually applied)
+        Optimized with pre-allocated arrays, in-place accumulation, and result caching.
+        Identical queries return cached results for massive speedup.
         """
+        # Check cache first
+        cache_key = self._create_cache_key(parameter, filters, multiplier)
+        if cache_key in self._extraction_cache:
+            # Return cached result (numpy arrays are mutable, so return a copy)
+            cached_values, cached_sources = self._extraction_cache[cache_key]
+            return cached_values.copy(), cached_sources.copy()
+        
+        # Cache miss - compute result
         list_fields = {k: v for k, v in filters.items() if isinstance(v, list)}
         
         if list_fields:
-            arrays = []
-            all_column_names = []
+            # Pre-allocate result array for efficiency
+            df = self.data[parameter]
+            n_rows = len(df)
+            combined = np.zeros(n_rows, dtype=np.float64)
+            all_sources = []
             
+            # Accumulate directly into combined array (avoids list growth + vstack)
             for field, values in list_fields.items():
                 for value in values:
                     single_filters = {**filters, field: value}
                     cols, sources = self._select_columns(parameter, single_filters)
                     
-                    df = self.data[parameter]
+                    # Extract and accumulate in-place
                     arr = (
                         df.select(cols)
                         .select(pl.sum_horizontal(pl.all().cast(pl.Float64, strict=False)))
                         .to_series()
                         .to_numpy()
                     )
-                    arrays.append(arr)
-                    all_column_names.extend(sources)
+                    combined += arr  # In-place addition
+                    all_sources.extend(sources)
             
-            combined = np.sum(np.vstack(arrays), axis=0) * multiplier
-            applied_filters = self._extract_applied_filters(parameter, all_column_names, filters)
-            return combined, applied_filters
-        
-        cols, sources = self._select_columns(parameter, filters)
-        df = self.data[parameter]
-        
-        values = (
-            df.select(cols)
-            .select(pl.sum_horizontal(pl.all().cast(pl.Float64, strict=False)))
-            .to_series()
-            .to_numpy()
-        ) * multiplier
-        
-        applied_filters = self._extract_applied_filters(parameter, cols, filters)
-        return values, applied_filters
-    
-    def _extract_applied_filters(
-        self,
-        parameter: str,
-        column_names: List[str],
-        original_filters: Dict[str, Any]
-    ) -> Dict[str, Any]:
-        """Extract structured filter information from selected columns.
-        
-        Args:
-            parameter: Parameter name
-            column_names: List of selected column names
-            original_filters: Original filters that were applied
+            combined *= multiplier
+            result = (combined, all_sources)
+        else:
+            cols, sources = self._select_columns(parameter, filters)
+            df = self.data[parameter]
             
-        Returns:
-            Dictionary with field types as keys and lists of values that were actually used
+            values = (
+                df.select(cols)
+                .select(pl.sum_horizontal(pl.all().cast(pl.Float64, strict=False)))
+                .to_series()
+                .to_numpy()
+            ) * multiplier
             
-        Examples:
-            {'zones': ['z1', 'z2', 'z3'], 'property': 'stoiip'}
-            {'segments': ['north', 'south'], 'property': 'giip'}
-        """
-        if parameter not in self.metadata or self.metadata[parameter].is_empty():
-            return {}
+            result = (values, sources)
         
-        metadata = self.metadata[parameter]
-        dynamic_field_names = self.dynamic_fields.get(parameter, [])
-        
-        # Filter metadata to only selected columns
-        selected_metadata = metadata.filter(pl.col("column_name").is_in(column_names))
-        
-        if selected_metadata.is_empty():
-            return {}
-        
-        applied_filters = {}
-        
-        # Extract unique values for each dynamic field
-        for field_name in dynamic_field_names:
-            if field_name in selected_metadata.columns:
-                unique_values = (
-                    selected_metadata
-                    .select(field_name)
-                    .filter(pl.col(field_name).is_not_null())
-                    .unique()
-                    .sort(field_name)
-                    .to_series()
-                    .to_list()
-                )
-                if unique_values:
-                    applied_filters[field_name] = unique_values
-        
-        # Add property information if present in original filters
-        if "property" in original_filters:
-            prop_filter = original_filters["property"]
-            if isinstance(prop_filter, list):
-                applied_filters["property"] = prop_filter
-            else:
-                applied_filters["property"] = prop_filter
-        
-        return applied_filters
+        # Cache the result
+        self._extraction_cache[cache_key] = result
+        return result[0].copy(), result[1].copy()
     
     def _validate_numeric(self, values: np.ndarray, description: str) -> np.ndarray:
         """Validate array contains finite numeric values."""
@@ -2080,6 +2174,7 @@ class TornadoProcessor:
                 - p90p10_threshold: Minimum case count for p90p10 (default 10)
                 - p: Percentile value for 'percentile' stat (default 50)
                 - skip: List of keys to skip in output (e.g., ['errors', 'filters'])
+                  Note: 'filters' includes multiplier
             case_selection: Whether to find closest matching cases (default False)
             selection_criteria: Criteria for selecting cases (only used if case_selection=True):
                 - weights: dict of property weights (e.g., {'stoiip': 0.6, 'giip': 0.4})
@@ -2087,17 +2182,33 @@ class TornadoProcessor:
             return_case_references: If True (default), return lightweight references instead of full details
 
         Returns:
-            Dictionary with computed statistics and optionally closest_cases (as references or full details).
-            Includes 'filters' key showing which zones/segments/properties were actually used in computation.
+            Dictionary with computed statistics and applied filters (including multiplier). 
+            Optionally includes closest_cases (as references or full details).
             
         Examples:
             # Simple mean computation
             result = processor.compute('mean', filters={'property': 'stoiip'})
-            # result['filters'] = {'property': 'stoiip'}
+            # Returns: {
+            #     'parameter': 'NTG',
+            #     'mean': 1234.5,
+            #     'filters': {
+            #         'property': 'stoiip',
+            #         'multiplier': 1.0
+            #     }
+            # }
             
-            # With zone filters
-            result = processor.compute('p90p10', filters={'property': 'stoiip', 'zones': ['z1', 'z2']})
-            # result['filters'] = {'zones': ['z1', 'z2'], 'property': 'stoiip'}
+            # With custom multiplier
+            result = processor.compute('mean', 
+                                      filters={'property': 'stoiip'}, 
+                                      multiplier=1e-6)
+            # Returns: {
+            #     'parameter': 'NTG',
+            #     'mean': 1.2345,  # In MMsm3
+            #     'filters': {
+            #         'property': 'stoiip',
+            #         'multiplier': 1e-6
+            #     }
+            # }
             
             # Override property
             result = processor.compute('mean', filters={'zones': ['z1']}, property='stoiip')
@@ -2145,7 +2256,6 @@ class TornadoProcessor:
         
         # Extract values for all properties
         property_values = {}
-        property_filters = {}
         
         if is_multi_property:
             non_property_filters = {k: v for k, v in filters.items() if k != "property"}
@@ -2153,10 +2263,9 @@ class TornadoProcessor:
             for prop in property_filter:
                 try:
                     prop_filters = {**non_property_filters, "property": prop}
-                    prop_vals, prop_applied_filters = self._extract_values(resolved, prop_filters, multiplier)
+                    prop_vals, _ = self._extract_values(resolved, prop_filters, multiplier)
                     prop_vals = self._validate_numeric(prop_vals, prop)
                     property_values[prop] = prop_vals
-                    property_filters[prop] = prop_applied_filters
                 except Exception as e:
                     if "errors" not in skip:
                         result["errors"] = result.get("errors", [])
@@ -2165,10 +2274,9 @@ class TornadoProcessor:
             # Single property mode
             prop = filters.get("property", "value")
             try:
-                values, applied_filters = self._extract_values(resolved, filters, multiplier)
+                values, _ = self._extract_values(resolved, filters, multiplier)
                 values = self._validate_numeric(values, prop)
                 property_values[prop] = values
-                property_filters[prop] = applied_filters
             except Exception as e:
                 if "errors" not in skip:
                     result["errors"] = result.get("errors", [])
@@ -2208,12 +2316,11 @@ class TornadoProcessor:
             if closest_cases:
                 result["closest_cases"] = closest_cases
         
-        # Add filters if not skipped (renamed from sources)
+        # Add filters with multiplier for full transparency (unless skipped)
         if "filters" not in skip:
-            if is_multi_property:
-                result["filters"] = property_filters
-            else:
-                result["filters"] = property_filters[list(property_filters.keys())[0]]
+            filters_output = filters.copy() if filters else {}
+            filters_output['multiplier'] = multiplier
+            result["filters"] = filters_output
         
         return result
     
@@ -2249,7 +2356,8 @@ class TornadoProcessor:
             return_case_references: If True (default), return references instead of full details
 
         Returns:
-            List of result dictionaries (or single dict if only one parameter)
+            List of result dictionaries with statistics and filters (including multiplier)
+            (or single dict if only one parameter)
             
         Examples:
             # Compute for all parameters with property override
@@ -2258,6 +2366,18 @@ class TornadoProcessor:
                 filters={'zones': ['z1']},
                 property='stoiip'
             )
+            # Returns: [
+            #     {
+            #         'parameter': 'NTG',
+            #         'p90p10': [1100, 1400],
+            #         'filters': {
+            #             'zones': ['z1'], 
+            #             'property': 'stoiip',
+            #             'multiplier': 1.0
+            #         }
+            #     },
+            #     ...
+            # ]
         """
         # Resolve filter preset if string provided
         filters = self._resolve_filter_preset(filters)
@@ -2435,6 +2555,7 @@ class TornadoProcessor:
             property: Property override (see compute() for details)
             multiplier: Override default multiplier
             skip: Single field or list of fields to skip in output (e.g., 'filters' or ['filters', 'errors'])
+                  Note: 'filters' includes multiplier
             options: Additional stats-specific options (merged with skip)
             case_selection: Whether to find closest matching cases
             selection_criteria: Criteria for selecting cases
@@ -2444,13 +2565,33 @@ class TornadoProcessor:
             return_case_references: Return references instead of full details (default True)
             
         Returns:
-            List of result dictionaries with minmax and p90p10 statistics for all parameters
+            List of result dictionaries with minmax, p90p10 statistics, and filters 
+            (including multiplier) for all parameters
             
         Examples:
             # Simple tornado with property override
             results = processor.tornado(
                 filters={'zones': ['z1']},
                 property='stoiip'
+            )
+            # Returns: [
+            #     {
+            #         'parameter': 'NTG',
+            #         'minmax': [1000, 1500],
+            #         'p90p10': [1100, 1400],
+            #         'filters': {
+            #             'zones': ['z1'], 
+            #             'property': 'stoiip',
+            #             'multiplier': 1.0
+            #         }
+            #     },
+            #     ...
+            # ]
+            
+            # Skip filters in output
+            results = processor.tornado(
+                property='stoiip',
+                skip='filters'
             )
         """
         # Merge skip into options
