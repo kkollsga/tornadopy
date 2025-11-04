@@ -1703,20 +1703,53 @@ class TornadoProcessor:
                         if isinstance(stat_value, list) and len(stat_value) == 2:
                             if isinstance(stat_value[0], dict):
                                 # Multi-property
-                                targets['p10'] = stat_value[0]
-                                targets['p90'] = stat_value[1]
+                                targets['p10'] = stat_value[0].copy()
+                                targets['p90'] = stat_value[1].copy()
                             else:
-                                # Single property
-                                prop = list(weighted_property_values.keys())[0]
-                                targets['p10'] = {prop: stat_value[0]}
-                                targets['p90'] = {prop: stat_value[1]}
-                    else:
-                        # mean or median
-                        if isinstance(stat_value, dict):
-                            targets[stat] = stat_value
+                                # Single property - need to compute for ALL weighted properties
+                                targets['p10'] = {}
+                                targets['p90'] = {}
+                                
+                                # Compute percentiles for all weighted properties
+                                for prop in weighted_property_values.keys():
+                                    p_vals = weighted_property_values[prop]
+                                    p10, p90 = np.percentile(p_vals, [10, 90])
+                                    targets['p10'][prop] = self._to_float(p10, decimals)
+                                    targets['p90'][prop] = self._to_float(p90, decimals)
                         else:
-                            prop = list(weighted_property_values.keys())[0]
-                            targets[stat] = {prop: stat_value}
+                            # Shouldn't happen, but handle gracefully
+                            targets['p10'] = {}
+                            targets['p90'] = {}
+                    else:
+                        # mean or median - compute for all weighted properties
+                        if isinstance(stat_value, dict):
+                            targets[stat] = stat_value.copy()
+                        else:
+                            # Single property - compute for all weighted properties
+                            targets[stat] = {}
+                            for prop in weighted_property_values.keys():
+                                p_vals = weighted_property_values[prop]
+                                if stat == 'mean':
+                                    targets[stat][prop] = self._to_float(np.mean(p_vals), decimals)
+                                elif stat == 'median':
+                                    targets[stat][prop] = self._to_float(np.median(p_vals), decimals)
+                    
+                    # Now ensure ALL weighted properties have targets computed
+                    # (in case some were extracted for weighting but not in original stats)
+                    for case_type in list(targets.keys()):
+                        if isinstance(targets[case_type], dict):
+                            for prop in weighted_property_values.keys():
+                                if prop not in targets[case_type]:
+                                    # Compute missing target
+                                    p_vals = weighted_property_values[prop]
+                                    if case_type == 'p10':
+                                        targets[case_type][prop] = self._to_float(np.percentile(p_vals, 10), decimals)
+                                    elif case_type == 'p90':
+                                        targets[case_type][prop] = self._to_float(np.percentile(p_vals, 90), decimals)
+                                    elif case_type == 'mean':
+                                        targets[case_type][prop] = self._to_float(np.mean(p_vals), decimals)
+                                    elif case_type == 'median':
+                                        targets[case_type][prop] = self._to_float(np.median(p_vals), decimals)
         
         # Find closest cases for accumulated targets
         if targets:
@@ -1728,6 +1761,7 @@ class TornadoProcessor:
             closest_cases.extend(found_cases)
         
         return closest_cases
+
     
     # ================================================================
     # PUBLIC API - INFORMATION ACCESS
