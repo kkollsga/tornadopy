@@ -156,7 +156,7 @@ class Case:
         """
         filtered = self.filter(filter_name)
         print(filtered)
-        return filtered)
+        return filtered
         
         return "\n".join(lines)
     
