@@ -897,69 +897,229 @@ class TornadoProcessor:
         return values[np.isfinite(values)]
     
     # ================================================================
-    # CASE SELECTION HELPERS
+    # CASE SELECTION HELPERS - NEW UNIFIED ARCHITECTURE
     # ================================================================
     
-    def _prepare_weighted_case_selection(
+    def _resolve_selection_item(
         self,
-        property_values: Dict[str, np.ndarray],
-        selection_criteria: Dict[str, Any],
-        resolved: str,
-        filters: Dict[str, Any],
-        multiplier: float,
-        skip: List[str]
-    ) -> Tuple[Dict[str, np.ndarray], Dict[str, float], List[str]]:
-        """Extract weighted properties and compute weights for case selection.
+        key: str,
+        parameter: str,
+        main_filters: Dict[str, Any]
+    ) -> Tuple[Dict[str, Any], str, str]:
+        """Resolve a selection_criteria key to (filters, property, source).
         
-        This eliminates code duplication across mean/median/percentile compute methods.
+        Resolution order:
+            1. Check if it's a property name → use main_filters
+            2. Check if it's a stored filter → use that filter
+            3. Not found → error with helpful message
         
         Args:
-            property_values: Already extracted property values
-            selection_criteria: Criteria containing weights
-            resolved: Resolved parameter name
-            filters: Applied filters
-            multiplier: Applied multiplier
+            key: Key from selection_criteria dict
+            parameter: Parameter name for property lookup
+            main_filters: Main filters from compute() call
+            
+        Returns:
+            Tuple of (filters_dict, property_name, source_type)
+            source_type = 'property' or 'stored_filter'
+            
+        Raises:
+            ValueError: If key not found or stored filter invalid
+            
+        Examples:
+            # Property name
+            _resolve_selection_item('stoiip', 'NTG', {'zones': ['z1']})
+            → ({'zones': ['z1']}, 'stoiip', 'property')
+            
+            # Stored filter
+            _resolve_selection_item('Cerisa_STOIIP', 'NTG', {})
+            → ({'zones': ['Cerisa Main'], 'property': 'stoiip'}, 'stoiip', 'stored_filter')
+        """
+        # Normalize and check properties first
+        properties = self.properties(parameter)
+        key_normalized = key.lower()
+        
+        if key_normalized in properties:
+            # It's a property - use main filters
+            return main_filters, key_normalized, 'property'
+        
+        # Check stored filters
+        if key in self.stored_filters:
+            filter_def = self.stored_filters[key].copy()
+            
+            # Must have property key
+            property_from_filter = filter_def.pop('property', None)
+            if property_from_filter is None:
+                raise ValueError(
+                    f"Stored filter '{key}' must have 'property' key for use in selection_criteria"
+                )
+            
+            # Must be single property (not a list)
+            if isinstance(property_from_filter, list):
+                if len(property_from_filter) != 1:
+                    raise ValueError(
+                        f"Stored filter '{key}' has multiple properties {property_from_filter}. "
+                        f"Selection criteria requires single property per filter. "
+                        f"Use 'combinations' syntax for multi-property filters."
+                    )
+                property_from_filter = property_from_filter[0]
+            
+            return filter_def, property_from_filter.lower(), 'stored_filter'
+        
+        # Not found anywhere
+        raise ValueError(
+            f"Selection key '{key}' not recognized.\n"
+            f"  Available properties: {properties}\n"
+            f"  Available filters: {list(self.stored_filters.keys())}"
+        )
+    
+    def _normalize_selection_criteria(
+        self,
+        criteria: Dict[str, Any],
+        parameter: str,
+        main_filters: Dict[str, Any]
+    ) -> Tuple[List[Dict[str, Any]], str]:
+        """Normalize selection_criteria to unified format.
+        
+        Converts both simple dict and combinations format to a list of property specs.
+        Each spec contains property, weight, and filters.
+        
+        Args:
+            criteria: Selection criteria from user
+            parameter: Parameter name
+            main_filters: Main filters from compute() call
+            
+        Returns:
+            Tuple of (specs_list, mode)
+            specs_list = [{'property': str, 'weight': float, 'filters': dict}, ...]
+            mode = 'simple' or 'combinations'
+            
+        Examples:
+            # Simple mode
+            criteria = {'stoiip': 0.6, 'giip': 0.4}
+            → ([{'property': 'stoiip', 'weight': 0.6, 'filters': {...}},
+                {'property': 'giip', 'weight': 0.4, 'filters': {...}}],
+               'simple')
+            
+            # Combinations mode
+            criteria = {
+                'combinations': [
+                    {'filters': 'Cerisa', 'properties': {'stoiip': 0.6}},
+                    {'properties': {'giip': 0.4}}
+                ]
+            }
+            → ([{'property': 'stoiip', 'weight': 0.6, 'filters': {...}},
+                {'property': 'giip', 'weight': 0.4, 'filters': {...}}],
+               'combinations')
+        """
+        if not criteria:
+            return [], 'empty'
+        
+        specs = []
+        
+        if 'combinations' in criteria:
+            # Complex combinations mode
+            for combo in criteria['combinations']:
+                combo_filters = combo.get('filters')
+                
+                # Resolve filters
+                if combo_filters is None:
+                    combo_filters = main_filters  # Inherit
+                elif isinstance(combo_filters, str):
+                    combo_filters = self.get_filter(combo_filters)  # Resolve stored filter
+                
+                # Extract property from filters if present, then remove it
+                combo_filters = combo_filters.copy()
+                filter_property = combo_filters.pop('property', None)
+                
+                # Process properties dict
+                for prop, weight in combo['properties'].items():
+                    prop_normalized = prop.lower()
+                    specs.append({
+                        'property': prop_normalized,
+                        'weight': weight,
+                        'filters': combo_filters
+                    })
+            
+            return specs, 'combinations'
+        
+        else:
+            # Simple mode - resolve each key
+            for key, weight in criteria.items():
+                filters_resolved, property_name, source = self._resolve_selection_item(
+                    key, parameter, main_filters
+                )
+                
+                # Remove property from filters (will be added per spec)
+                filters_resolved = filters_resolved.copy()
+                filters_resolved.pop('property', None)
+                
+                specs.append({
+                    'property': property_name,
+                    'weight': weight,
+                    'filters': filters_resolved
+                })
+            
+            return specs, 'simple'
+    
+    def _extract_weighted_properties(
+        self,
+        specs: List[Dict[str, Any]],
+        parameter: str,
+        multiplier: float,
+        skip: List[str]
+    ) -> Tuple[Dict[str, np.ndarray], List[str]]:
+        """Extract all properties needed for weighted case selection.
+        
+        Unified property extraction for both simple and combinations modes.
+        
+        Args:
+            specs: List of property specs from _normalize_selection_criteria
+            parameter: Parameter name
+            multiplier: Multiplier to apply
             skip: Skip list for error handling
             
         Returns:
-            Tuple of (weighted_property_values, weights, errors)
+            Tuple of (property_values, errors)
+            property_values = {'property_name': np.ndarray, ...}
+            errors = [error_message, ...]
         """
+        property_values = {}
         errors = []
         
-        # Get or create default weights
-        weights = selection_criteria.get("weights")
-        if not weights:
-            weights = {prop: 1.0 / len(property_values) for prop in property_values.keys()}
+        for spec in specs:
+            prop = spec['property']
+            weight = spec['weight']
+            filters = spec['filters']
+            
+            # Skip if already extracted (same property with same filters)
+            cache_key = f"{prop}:{hash(str(sorted(filters.items())))}"
+            if cache_key in property_values:
+                continue
+            
+            try:
+                # Merge property into filters for extraction
+                prop_filters = {**filters, 'property': prop}
+                prop_vals, _ = self._extract_values(parameter, prop_filters, multiplier)
+                prop_vals = self._validate_numeric(prop_vals, prop)
+                property_values[prop] = prop_vals
+            except Exception as e:
+                if "errors" not in skip:
+                    errors.append(f"Failed to extract '{prop}' with filters {filters}: {e}")
         
-        # Extract additional properties if needed for weighting
-        weighted_property_values = dict(property_values)
-        non_property_filters = {k: v for k, v in filters.items() if k != "property"}
-        
-        for prop in weights.keys():
-            if prop not in weighted_property_values:
-                try:
-                    prop_filters = {**non_property_filters, "property": prop}
-                    prop_vals, _ = self._extract_values(resolved, prop_filters, multiplier)
-                    prop_vals = self._validate_numeric(prop_vals, prop)
-                    weighted_property_values[prop] = prop_vals
-                except Exception as e:
-                    if "errors" not in skip:
-                        errors.append(f"Failed to extract {prop} for weighting: {e}")
-        
-        return weighted_property_values, weights, errors
+        return property_values, errors
     
     def _calculate_weighted_distance(
         self,
         property_values: Dict[str, np.ndarray],
-        targets: Dict[str, float],
-        weights: Dict[str, float]
+        specs: List[Dict[str, Any]],
+        targets: Dict[str, float]
     ) -> np.ndarray:
         """Calculate weighted normalized distance for each case.
         
         Args:
             property_values: Dictionary of property name to array of values
+            specs: Property specs with weights
             targets: Dictionary of property name to target value
-            weights: Dictionary of property name to weight
             
         Returns:
             Array of distances for each case
@@ -967,7 +1127,10 @@ class TornadoProcessor:
         n_cases = len(list(property_values.values())[0])
         distances = np.zeros(n_cases)
         
-        for prop, weight in weights.items():
+        for spec in specs:
+            prop = spec['property']
+            weight = spec['weight']
+            
             if prop in property_values and prop in targets:
                 p_vals = property_values[prop]
                 target = targets[prop]
@@ -981,96 +1144,12 @@ class TornadoProcessor:
         
         return distances
     
-    def _calculate_multi_combination_distance(
-        self,
-        weighted_combinations: List[Dict],
-        resolved: str,
-        base_filters: Dict[str, Any],
-        multiplier: float,
-        case_type: str,
-        skip: List[str]
-    ) -> Tuple[np.ndarray, Dict]:
-        """Calculate weighted distance across multiple filter+property combinations.
-        
-        Args:
-            weighted_combinations: List of dicts with 'filters' and 'properties' keys
-            resolved: Resolved parameter name
-            base_filters: Base filters (will be merged with combination filters)
-            multiplier: Multiplier to apply
-            case_type: 'p10' or 'p90' or other percentile
-            skip: Skip list for error handling
-            
-        Returns:
-            Tuple of (distances array, metadata dict with targets and weights)
-        """
-        n_cases = None
-        total_distances = None
-        all_targets = {}
-        all_weights = {}
-        
-        for combo in weighted_combinations:
-            combo_filters = combo.get("filters", {})
-            property_weights = combo.get("properties", {})
-            
-            # Merge base filters with combination filters (combination overrides base)
-            merged_filters = {**base_filters, **combo_filters}
-            # Remove property from merged filters as we'll specify it per property
-            merged_filters_no_prop = {k: v for k, v in merged_filters.items() if k != "property"}
-            
-            for prop, weight in property_weights.items():
-                try:
-                    prop_filters = {**merged_filters_no_prop, "property": prop}
-                    prop_vals, _ = self._extract_values(resolved, prop_filters, multiplier)
-                    prop_vals = self._validate_numeric(prop_vals, prop)
-                    
-                    # Initialize on first successful extraction
-                    if n_cases is None:
-                        n_cases = len(prop_vals)
-                        total_distances = np.zeros(n_cases)
-                    
-                    # Calculate percentile target
-                    if case_type == "p10":
-                        target = np.percentile(prop_vals, 10)
-                    elif case_type == "p90":
-                        target = np.percentile(prop_vals, 90)
-                    elif case_type == "median":
-                        target = np.median(prop_vals)
-                    elif case_type.startswith("p"):
-                        p = int(case_type[1:])
-                        target = np.percentile(prop_vals, p)
-                    else:
-                        target = np.median(prop_vals)
-                    
-                    # Create unique key for this combo+property
-                    combo_key = f"{prop}_{hash(str(combo_filters))}"
-                    all_targets[combo_key] = target
-                    all_weights[combo_key] = weight
-                    
-                    # Calculate normalized distance
-                    prop_range = np.percentile(prop_vals, 90) - np.percentile(prop_vals, 10)
-                    if prop_range > 0:
-                        total_distances += weight * np.abs(prop_vals - target) / prop_range
-                    else:
-                        total_distances += weight * np.abs(prop_vals - target)
-                        
-                except Exception as e:
-                    if "errors" not in skip:
-                        print(f"Warning: Failed to process {prop} with filters {combo_filters}: {e}")
-        
-        metadata = {
-            "targets": all_targets,
-            "weights": all_weights,
-            "combinations": weighted_combinations
-        }
-        
-        return total_distances, metadata
-    
     def _get_case_reference_info(
         self,
         index: int,
         parameter: str,
         case_type: str = None,
-        weights: Dict[str, float] = None,
+        specs: List[Dict[str, Any]] = None,
         weighted_distance: float = None,
         selection_values: Dict[str, float] = None,
         selection_method: str = "weighted"
@@ -1081,7 +1160,7 @@ class TornadoProcessor:
             index: Case index
             parameter: Parameter name
             case_type: Type of case (e.g., 'p10', 'p90', 'mean', 'min', 'max')
-            weights: Weights used for selection
+            specs: Property specs with weights
             weighted_distance: Distance metric for weighted selection
             selection_values: Values used in selection
             selection_method: Method used for selection
@@ -1096,7 +1175,9 @@ class TornadoProcessor:
             "reference": reference
         }
         
-        if weights:
+        if specs:
+            # Extract weights from specs
+            weights = {spec['property']: spec['weight'] for spec in specs}
             info["weights"] = weights
         if weighted_distance is not None:
             info["weighted_distance"] = weighted_distance
@@ -1110,8 +1191,8 @@ class TornadoProcessor:
     def _find_closest_cases(
         self,
         property_values: Dict[str, np.ndarray],
+        specs: List[Dict[str, Any]],
         targets: Dict[str, Dict[str, float]],
-        weights: Dict[str, float],
         resolved: str,
         filters: Dict[str, Any],
         multiplier: float,
@@ -1122,8 +1203,8 @@ class TornadoProcessor:
         
         Args:
             property_values: Dictionary of property name to array of values
+            specs: Property specs with weights
             targets: Dictionary of case type to {property: target_value}
-            weights: Dictionary of property name to weight
             resolved: Resolved parameter name
             filters: Applied filters
             multiplier: Applied multiplier
@@ -1137,13 +1218,14 @@ class TornadoProcessor:
         first_prop = list(property_values.keys())[0]
         
         for case_type, case_targets in targets.items():
-            distances = self._calculate_weighted_distance(property_values, case_targets, weights)
+            distances = self._calculate_weighted_distance(property_values, specs, case_targets)
             idx = np.argmin(distances)
             
             if return_references:
                 # Return lightweight reference with compact format
                 selection_values = {}
-                for prop in weights.keys():
+                for spec in specs:
+                    prop = spec['property']
                     if prop in property_values:
                         # Use 'actual' for the case value
                         selection_values[f"{prop}_actual"] = self._to_float(property_values[prop][idx], decimals)
@@ -1155,7 +1237,7 @@ class TornadoProcessor:
                     int(idx),
                     resolved,
                     case_type=case_type,
-                    weights=weights,
+                    specs=specs,
                     weighted_distance=self._to_float(distances[idx], decimals),
                     selection_values=selection_values,
                     selection_method="weighted"
@@ -1167,12 +1249,13 @@ class TornadoProcessor:
                     property_values[first_prop][idx], decimals
                 )
                 case_info["case"] = case_type
-                case_info["weights"] = weights
+                case_info["weights"] = {spec['property']: spec['weight'] for spec in specs}
                 case_info["weighted_distance"] = self._to_float(distances[idx], decimals)
                 
                 # Add selection_values showing actual values and targets for this case
                 selection_values = {}
-                for prop in weights.keys():
+                for spec in specs:
+                    prop = spec['property']
                     if prop in property_values:
                         selection_values[f"{prop}_actual"] = self._to_float(property_values[prop][idx], decimals)
                         if prop in case_targets:
@@ -1519,13 +1602,15 @@ class TornadoProcessor:
     ) -> List[Dict]:
         """Perform case selection for computed statistics.
         
+        Uses new unified architecture with smart property/filter resolution.
+        
         Args:
-            property_values: Dict of property arrays
+            property_values: Dict of already-extracted property arrays
             stats: List of computed stats
             stats_result: Results from _compute_all_stats
-            selection_criteria: Criteria with weights or combinations
+            selection_criteria: Criteria dict (flat or combinations)
             resolved: Parameter name
-            filters: Applied filters
+            filters: Applied filters from main compute() call
             multiplier: Applied multiplier
             skip: Skip list
             decimals: Decimal places
@@ -1534,75 +1619,35 @@ class TornadoProcessor:
         Returns:
             List of closest case details or references
         """
-        _round = lambda x: round(x, decimals)
         closest_cases = []
         
-        # Check if using combinations (complex) or simple weights
-        combinations = selection_criteria.get("combinations")
-        
-        if combinations:
-            # Handle weighted combinations for p90p10 only
-            if 'p90p10' in stats:
-                # Calculate distances for p10 and p90
-                distances_p10, _ = self._calculate_multi_combination_distance(
-                    combinations, resolved, filters, multiplier, "p10", skip
-                )
-                distances_p90, _ = self._calculate_multi_combination_distance(
-                    combinations, resolved, filters, multiplier, "p90", skip
-                )
-                
-                if distances_p10 is not None and distances_p90 is not None:
-                    first_prop = list(property_values.keys())[0]
-                    
-                    # P10 case
-                    idx_p10 = np.argmin(distances_p10)
-                    if return_references:
-                        case_p10 = self._get_case_reference_info(
-                            int(idx_p10),
-                            resolved,
-                            case_type="p10",
-                            weighted_distance=self._to_float(distances_p10[idx_p10], decimals),
-                            selection_method="weighted_combinations"
-                        )
-                    else:
-                        case_p10 = self._get_case_details(
-                            int(idx_p10), resolved, filters, multiplier,
-                            property_values[first_prop][idx_p10], decimals
-                        )
-                        case_p10["case"] = "p10"
-                        case_p10["selection_method"] = "weighted_combinations"
-                        case_p10["weighted_distance"] = self._to_float(distances_p10[idx_p10], decimals)
-                    closest_cases.append(case_p10)
-                    
-                    # P90 case
-                    idx_p90 = np.argmin(distances_p90)
-                    if return_references:
-                        case_p90 = self._get_case_reference_info(
-                            int(idx_p90),
-                            resolved,
-                            case_type="p90",
-                            weighted_distance=self._to_float(distances_p90[idx_p90], decimals),
-                            selection_method="weighted_combinations"
-                        )
-                    else:
-                        case_p90 = self._get_case_details(
-                            int(idx_p90), resolved, filters, multiplier,
-                            property_values[first_prop][idx_p90], decimals
-                        )
-                        case_p90["case"] = "p90"
-                        case_p90["selection_method"] = "weighted_combinations"
-                        case_p90["weighted_distance"] = self._to_float(distances_p90[idx_p90], decimals)
-                    closest_cases.append(case_p90)
-            
-            return closest_cases
-        
-        # Simple weights-based selection
-        weighted_property_values, weights, errors = self._prepare_weighted_case_selection(
-            property_values, selection_criteria, resolved, filters, multiplier, skip
+        # Normalize selection criteria to unified format
+        specs, mode = self._normalize_selection_criteria(
+            selection_criteria,
+            resolved,
+            filters
         )
         
+        if not specs:
+            # No specs - generate equal weights for extracted properties
+            specs = [
+                {'property': prop, 'weight': 1.0 / len(property_values), 'filters': filters}
+                for prop in property_values.keys()
+            ]
+            mode = 'auto'
+        
+        # Extract all properties needed (some may not be in property_values yet)
+        weighted_property_values, errors = self._extract_weighted_properties(
+            specs, resolved, multiplier, skip
+        )
+        
+        if errors and "errors" not in skip:
+            # Add extraction errors to result (will be merged later)
+            for error in errors:
+                closest_cases.append({"error": error})
+        
         if not weighted_property_values:
-            return []
+            return closest_cases
         
         # Build targets dict for each stat that supports case selection
         targets = {}
@@ -1676,7 +1721,7 @@ class TornadoProcessor:
         # Find closest cases for accumulated targets
         if targets:
             found_cases = self._find_closest_cases(
-                weighted_property_values, targets, weights,
+                weighted_property_values, specs, targets,
                 resolved, filters, multiplier, decimals,
                 return_references=return_references
             )
@@ -2176,9 +2221,36 @@ class TornadoProcessor:
                 - skip: List of keys to skip in output (e.g., ['errors', 'filters'])
                   Note: 'filters' includes multiplier
             case_selection: Whether to find closest matching cases (default False)
-            selection_criteria: Criteria for selecting cases (only used if case_selection=True):
-                - weights: dict of property weights (e.g., {'stoiip': 0.6, 'giip': 0.4})
-                - combinations: list of filter+property combinations for complex weighting
+            selection_criteria: Criteria for selecting cases (only used if case_selection=True).
+                Supports three formats:
+                
+                **Simple weights (most common):**
+                ```python
+                selection_criteria={'stoiip': 0.6, 'giip': 0.4}
+                ```
+                - Keys can be property names (uses main filters) or stored filter names
+                - Property names use the filters from the main compute() call
+                - Stored filter names use their defined filters (must have single 'property' key)
+                
+                **Combinations (advanced):**
+                ```python
+                selection_criteria={
+                    'combinations': [
+                        {'filters': 'Cerisa_zones', 'properties': {'stoiip': 0.6}},
+                        {'filters': {'zones': ['North']}, 'properties': {'giip': 0.4}},
+                        {'properties': {'gas': 0.2}}  # Inherits main filters
+                    ]
+                }
+                ```
+                - Allows different filters for different properties
+                - `filters` can be: stored filter name, dict, or None (inherit main)
+                - `properties` dict specifies weights for that filter combination
+                
+                **Resolution rules:**
+                - Property name → uses main filters from compute() call
+                - Stored filter name → uses that filter's zones/regions/etc.
+                - Ambiguous keys raise helpful error with available options
+                
             return_case_references: If True (default), return lightweight references instead of full details
 
         Returns:
@@ -2186,42 +2258,61 @@ class TornadoProcessor:
             Optionally includes closest_cases (as references or full details).
             
         Examples:
-            # Simple mean computation
+            # Simple computation
             result = processor.compute('mean', filters={'property': 'stoiip'})
-            # Returns: {
-            #     'parameter': 'NTG',
-            #     'mean': 1234.5,
-            #     'filters': {
-            #         'property': 'stoiip',
-            #         'multiplier': 1.0
-            #     }
-            # }
             
-            # With custom multiplier
-            result = processor.compute('mean', 
-                                      filters={'property': 'stoiip'}, 
-                                      multiplier=1e-6)
-            # Returns: {
-            #     'parameter': 'NTG',
-            #     'mean': 1.2345,  # In MMsm3
-            #     'filters': {
-            #         'property': 'stoiip',
-            #         'multiplier': 1e-6
-            #     }
-            # }
-            
-            # Override property
-            result = processor.compute('mean', filters={'zones': ['z1']}, property='stoiip')
-            
-            # Remove property filter
-            result = processor.compute('mean', filters={'zones': ['z1']}, property=False)
-            
-            # With case selection (returns references)
+            # With case selection using property names (inherits main filters)
             result = processor.compute(
-                'mean',
-                filters={'property': 'stoiip'},
+                'p90p10',
+                filters={'zones': ['z1', 'z2'], 'property': 'stoiip'},
                 case_selection=True,
                 selection_criteria={'stoiip': 0.6, 'giip': 0.4}
+            )
+            # Both stoiip and giip will use zones ['z1', 'z2']
+            
+            # With case selection using stored filters (different zones)
+            processor.set_filter('Cerisa_STOIIP', {
+                'zones': ['Cerisa Main SST1', 'Cerisa Main SST2'],
+                'property': 'stoiip'
+            })
+            processor.set_filter('North_GIIP', {
+                'zones': ['North 1', 'North 2'],
+                'property': 'giip'
+            })
+            
+            result = processor.compute(
+                'p90p10',
+                filters={'property': 'stoiip'},
+                case_selection=True,
+                selection_criteria={
+                    'Cerisa_STOIIP': 0.6,  # Uses Cerisa zones for stoiip
+                    'North_GIIP': 0.4      # Uses North zones for giip
+                }
+            )
+            
+            # Advanced: Mix property names and stored filters
+            result = processor.compute(
+                'mean',
+                filters={'zones': ['default_zone'], 'property': 'stoiip'},
+                case_selection=True,
+                selection_criteria={
+                    'stoiip': 0.5,           # Uses default_zone
+                    'Cerisa_STOIIP': 0.3,    # Uses Cerisa zones
+                    'giip': 0.2              # Uses default_zone
+                }
+            )
+            
+            # Complex combinations with inline filters
+            result = processor.compute(
+                'p90p10',
+                filters={'property': 'stoiip'},
+                case_selection=True,
+                selection_criteria={
+                    'combinations': [
+                        {'filters': 'Cerisa', 'properties': {'stoiip': 0.5, 'giip': 0.2}},
+                        {'filters': {'zones': ['North']}, 'properties': {'gas': 0.3}}
+                    ]
+                }
             )
         """
         resolved = self._resolve_parameter(parameter)
@@ -2249,10 +2340,6 @@ class TornadoProcessor:
             stats = [stats]
         
         result = {"parameter": resolved}
-        
-        # Helper to round
-        def _round(val):
-            return round(val, decimals)
         
         # Extract values for all properties
         property_values = {}
@@ -2349,7 +2436,7 @@ class TornadoProcessor:
             multiplier: Override default multiplier
             options: Stats-specific options (see compute() docstring)
             case_selection: Whether to find closest matching cases
-            selection_criteria: Criteria for selecting cases (see compute() docstring)
+            selection_criteria: Criteria for selecting cases (see compute() docstring for detailed examples)
             include_base_case: If True, add base case values to results (default True)
             include_reference_case: If True, add reference case values to results (default True)
             sort_by_range: If True, sort by p90p10 or minmax range (default True)
@@ -2360,24 +2447,23 @@ class TornadoProcessor:
             (or single dict if only one parameter)
             
         Examples:
-            # Compute for all parameters with property override
+            # Compute for all parameters
+            results = processor.compute_batch('p90p10')
+            
+            # With case selection across stored filters
+            processor.set_filters({
+                'Cerisa_STOIIP': {'zones': ['Cerisa Main'], 'property': 'stoiip'},
+                'North_GIIP': {'zones': ['North 1', 'North 2'], 'property': 'giip'}
+            })
+            
             results = processor.compute_batch(
                 'p90p10',
-                filters={'zones': ['z1']},
-                property='stoiip'
+                case_selection=True,
+                selection_criteria={
+                    'Cerisa_STOIIP': 0.6,
+                    'North_GIIP': 0.4
+                }
             )
-            # Returns: [
-            #     {
-            #         'parameter': 'NTG',
-            #         'p90p10': [1100, 1400],
-            #         'filters': {
-            #             'zones': ['z1'], 
-            #             'property': 'stoiip',
-            #             'multiplier': 1.0
-            #         }
-            #     },
-            #     ...
-            # ]
         """
         # Resolve filter preset if string provided
         filters = self._resolve_filter_preset(filters)
@@ -2558,7 +2644,7 @@ class TornadoProcessor:
                   Note: 'filters' includes multiplier
             options: Additional stats-specific options (merged with skip)
             case_selection: Whether to find closest matching cases
-            selection_criteria: Criteria for selecting cases
+            selection_criteria: Criteria for selecting cases (see compute() for detailed examples)
             include_base_case: Include base case values (default True)
             include_reference_case: Include reference case values (default True)
             sort_by_range: Sort by range (default True)
@@ -2569,30 +2655,26 @@ class TornadoProcessor:
             (including multiplier) for all parameters
             
         Examples:
-            # Simple tornado with property override
+            # Simple tornado
+            results = processor.tornado(property='stoiip')
+            
+            # With case selection using mixed property/filter names
+            processor.set_filter('Cerisa_STOIIP', {
+                'zones': ['Cerisa Main SST1', 'Cerisa Main SST2'],
+                'property': 'stoiip'
+            })
+            
             results = processor.tornado(
-                filters={'zones': ['z1']},
-                property='stoiip'
+                filters={'zones': ['North'], 'property': 'giip'},
+                case_selection=True,
+                selection_criteria={
+                    'giip': 0.6,            # Uses North zones (from main filter)
+                    'Cerisa_STOIIP': 0.4    # Uses Cerisa zones (from stored filter)
+                }
             )
-            # Returns: [
-            #     {
-            #         'parameter': 'NTG',
-            #         'minmax': [1000, 1500],
-            #         'p90p10': [1100, 1400],
-            #         'filters': {
-            #             'zones': ['z1'], 
-            #             'property': 'stoiip',
-            #             'multiplier': 1.0
-            #         }
-            #     },
-            #     ...
-            # ]
             
             # Skip filters in output
-            results = processor.tornado(
-                property='stoiip',
-                skip='filters'
-            )
+            results = processor.tornado(property='stoiip', skip='filters')
         """
         # Merge skip into options
         merged_options = options.copy() if options else {}
