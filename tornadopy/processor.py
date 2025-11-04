@@ -8,6 +8,518 @@ import polars as pl
 from fastexcel import read_excel
 
 
+class Case:
+    """Represents a single case from a tornado analysis with convenient access methods.
+    
+    This class provides an intuitive interface for working with case data, including
+    properties, variables, filtering, and recomputation.
+    
+    Attributes:
+        idx: Case index
+        parameter: Parameter name
+        reference: Case reference string (e.g., 'p10.NTG_42')
+        case_type: Case type tag if present (e.g., 'p10', 'p90', 'mean')
+        processor: Parent TornadoProcessor instance
+        
+    Examples:
+        # Get a case
+        case = processor.case(42, parameter='NTG')
+        
+        # Access properties
+        stoiip = case.stoiip
+        giip = case['giip']
+        all_props = case.properties()
+        
+        # Access variables
+        npv = case.var('NPV')
+        all_vars = case.variables()
+        
+        # Recompute with different filters
+        filtered_case = case.filter({'zones': ['z1', 'z2']})
+        
+        # Use stored filters
+        cerisa_case = case.filter('Cerisa_STOIIP')
+    """
+    
+    def __init__(
+        self,
+        data: Dict[str, Any],
+        processor: 'TornadoProcessor',
+        index: int = None,
+        parameter: str = None,
+        reference: str = None,
+        case_type: str = None
+    ):
+        """Initialize a Case object.
+        
+        Args:
+            data: Raw case data dictionary
+            processor: Parent TornadoProcessor instance
+            index: Case index
+            parameter: Parameter name
+            reference: Case reference string
+            case_type: Case type tag
+        """
+        self._data = data
+        self._processor = processor
+        self.idx = index if index is not None else data.get('idx')
+        self.parameter = parameter
+        self.reference = reference
+        
+        # Extract case_type from data or reference if not provided
+        if case_type:
+            self.case_type = case_type
+        elif 'case' in data:
+            self.case_type = data['case']
+        elif reference and '.' in reference:
+            # Parse from reference like 'p10.NTG_42'
+            self.case_type = reference.split('.')[0]
+        else:
+            self.case_type = None
+        
+        # Extract properties and variables from data
+        self._properties = data.get('properties', {})
+        self._variables = data.get('variables', {})
+        
+        # For backward compatibility with flat structure
+        if not self._properties:
+            # Extract non-special keys as properties
+            self._properties = {
+                k: v for k, v in data.items()
+                if not k.startswith('_') and k not in ['idx', 'parameter', 'case', 'multiplier', 'variables', 'properties']
+            }
+    
+    def __repr__(self) -> str:
+        """String representation of the case."""
+        if self.reference:
+            return f"Case({self.reference})"
+        elif self.parameter and self.idx is not None:
+            return f"Case({self.parameter}_{self.idx})"
+        else:
+            return f"Case(idx={self.idx})"
+    
+    def __str__(self) -> str:
+        """Human-readable string representation."""
+        lines = []
+        
+        # Header with reference and type
+        header = f"Case {self.reference if self.reference else f'{self.parameter}_{self.idx}'}"
+        if self.case_type:
+            header += f" ({self.case_type})"
+        lines.append(header)
+        lines.append("-" * len(header))
+        
+        # Show top-level numeric properties (not nested)
+        numeric_props = {
+            k: v for k, v in self._properties.items()
+            if isinstance(v, (int, float)) and not isinstance(v, bool)
+        }
+        
+        if numeric_props:
+            # Show in compact format
+            for prop, val in sorted(numeric_props.items())[:8]:
+                lines.append(f"  {prop:.<20} {val:>12,.2f}")
+            if len(numeric_props) > 8:
+                lines.append(f"  ... {len(numeric_props) - 8} more properties")
+        
+        # Show variables compactly
+        if self._variables:
+            lines.append("")
+            lines.append("Variables:")
+            for var, val in list(self._variables.items())[:5]:
+                if isinstance(val, (int, float)) and not isinstance(val, bool):
+                    lines.append(f"  {var:.<20} {val:>12,.2f}")
+                else:
+                    lines.append(f"  {var:.<20} {val}")
+            if len(self._variables) > 5:
+                lines.append(f"  ... {len(self._variables) - 5} more")
+        
+        return "\n".join(lines)
+    
+    def __call__(self, filter_name: str) -> 'Case':
+        """Apply a filter and print the results.
+        
+        Convenience method for quick filtered viewing.
+        
+        Args:
+            filter_name: Name of stored filter to apply
+            
+        Returns:
+            Filtered Case object (for chaining)
+            
+        Examples:
+            # Quick view of filtered case
+            case('Cerisa_STOIIP')
+            
+            # Chain with other operations
+            case('Cerisa_STOIIP').recompute(multiplier=1e-6)
+        """
+        filtered = self.filter(filter_name)
+        print(filtered)
+        return filtered)
+        
+        return "\n".join(lines)
+    
+    def __getattr__(self, name: str) -> Any:
+        """Allow attribute-style access to properties.
+        
+        Examples:
+            case.stoiip  # Access stoiip property
+            case.giip    # Access giip property
+        """
+        if name.startswith('_'):
+            # Don't intercept private attributes
+            raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")
+        
+        # Try properties first
+        if name in self._properties:
+            return self._properties[name]
+        
+        # Try direct data access
+        if name in self._data:
+            return self._data[name]
+        
+        raise AttributeError(f"Case has no property '{name}'. Available: {list(self._properties.keys())}")
+    
+    def __getitem__(self, key: str) -> Any:
+        """Allow dictionary-style access to properties.
+        
+        Examples:
+            case['stoiip']
+            case['GIIP']
+        """
+        key_lower = key.lower()
+        
+        # Try properties
+        if key_lower in self._properties:
+            return self._properties[key_lower]
+        
+        # Try direct data
+        if key in self._data:
+            return self._data[key]
+        
+        raise KeyError(f"Case has no property '{key}'. Available: {list(self._properties.keys())}")
+    
+    def __contains__(self, key: str) -> bool:
+        """Check if property exists.
+        
+        Examples:
+            'stoiip' in case
+            'NPV' in case
+        """
+        key_lower = key.lower()
+        return key_lower in self._properties or key in self._data
+    
+    def get(self, key: str, default: Any = None) -> Any:
+        """Get property value with optional default.
+        
+        Args:
+            key: Property name
+            default: Default value if property not found
+            
+        Returns:
+            Property value or default
+            
+        Examples:
+            stoiip = case.get('stoiip', 0.0)
+            recovery = case.get('recovery')
+        """
+        try:
+            return self[key]
+        except KeyError:
+            return default
+    
+    def properties(self, flat: bool = False) -> Dict[str, Any]:
+        """Get all properties.
+        
+        Args:
+            flat: If True, flatten nested hierarchy; if False, return as-is
+            
+        Returns:
+            Dictionary of properties
+            
+        Examples:
+            # Get all properties
+            props = case.properties()
+            
+            # Get flattened properties
+            flat_props = case.properties(flat=True)
+        """
+        if flat and isinstance(self._properties, dict):
+            # Flatten nested structure
+            def flatten(d, prefix=''):
+                items = []
+                for k, v in d.items():
+                    new_key = f"{prefix}.{k}" if prefix else k
+                    if isinstance(v, dict):
+                        items.extend(flatten(v, new_key))
+                    else:
+                        items.append((new_key, v))
+                return items
+            
+            return dict(flatten(self._properties))
+        
+        return self._properties.copy()
+    
+    def var(self, name: str, default: Any = None) -> Any:
+        """Get a variable value by name (without $ prefix).
+        
+        Args:
+            name: Variable name ($ prefix optional)
+            default: Default value if variable not found
+            
+        Returns:
+            Variable value or default
+            
+        Examples:
+            npv = case.var('NPV')
+            recovery = case.var('Recovery', 0.0)
+        """
+        # Strip $ prefix if present
+        name = name.lstrip('$')
+        return self._variables.get(name, default)
+    
+    def variables(
+        self,
+        names: Union[List[str], str, None] = None,
+        use_defaults: bool = True
+    ) -> Dict[str, Any]:
+        """Get variables with optional filtering.
+        
+        Args:
+            names: Specific variable names to get (optional)
+                   Can be a list of names or a single name
+            use_defaults: If True and names is None, use processor's default_variables
+            
+        Returns:
+            Dictionary of variable names to values (without $ prefix)
+            
+        Examples:
+            # Get all variables
+            vars = case.variables()
+            
+            # Get specific variables
+            vars = case.variables(['NPV', 'Recovery'])
+            vars = case.variables('NPV')
+            
+            # Ignore defaults, get all
+            all_vars = case.variables(use_defaults=False)
+        """
+        # If no names specified, check for defaults
+        if names is None and use_defaults:
+            names = self._processor.default_variables
+        
+        # If still no names, return all
+        if names is None:
+            return self._variables.copy()
+        
+        # Convert single name to list
+        if isinstance(names, str):
+            names = [names]
+        
+        # Filter variables
+        result = {}
+        for name in names:
+            name_clean = name.lstrip('$')
+            if name_clean in self._variables:
+                result[name_clean] = self._variables[name_clean]
+        
+        return result
+    
+    def filter(
+        self,
+        filters: Union[Dict[str, Any], str],
+        property: Union[str, List[str], bool, None] = None,
+        multiplier: float = None,
+        decimals: int = 6,
+        print_result: bool = False
+    ) -> 'Case':
+        """Recompute this case with different filters.
+        
+        Creates a new Case object with recalculated properties based on
+        the provided filters.
+        
+        Args:
+            filters: Filters dict or stored filter name
+            property: Property override (see TornadoProcessor.compute())
+            multiplier: Multiplier override
+            decimals: Decimal places for rounding
+            print_result: If True, print the filtered case before returning
+            
+        Returns:
+            New Case object with filtered data
+            
+        Examples:
+            # Filter to specific zones
+            cerisa_case = case.filter({'zones': ['Cerisa Main']})
+            
+            # Use stored filter
+            cerisa_case = case.filter('Cerisa_STOIIP')
+            
+            # Filter and print
+            cerisa_case = case.filter('Cerisa_STOIIP', print_result=True)
+            
+            # Change property
+            giip_case = case.filter('Cerisa_zones', property='giip')
+        """
+        if self.idx is None:
+            raise ValueError("Cannot filter case without index")
+        
+        # Resolve filter preset if string
+        if isinstance(filters, str):
+            filters = self._processor.get_filter(filters)
+        
+        # Get filtered case data from processor
+        filtered_data = self._processor.case(
+            self.idx,
+            parameter=self.parameter,
+            filters=filters,
+            property=property,
+            multiplier=multiplier,
+            decimals=decimals,
+            as_dict=True  # Get dict internally
+        )
+        
+        # Create new Case object
+        filtered_case = Case(
+            data=filtered_data,
+            processor=self._processor,
+            index=self.idx,
+            parameter=self.parameter,
+            reference=self.reference,
+            case_type=self.case_type
+        )
+        
+        if print_result:
+            print(filtered_case)
+        
+        return filtered_case
+    
+    def summary(self, filter_name: str = None) -> str:
+        """Get a compact summary string, optionally filtered.
+        
+        Args:
+            filter_name: Optional stored filter name to apply before summary
+            
+        Returns:
+            Formatted summary string
+            
+        Examples:
+            # Get summary of current case
+            print(case.summary())
+            
+            # Get filtered summary
+            print(case.summary('Cerisa_STOIIP'))
+        """
+        if filter_name:
+            filtered = self.filter(filter_name)
+            return str(filtered)
+        return str(self)
+    
+    def recompute(
+        self,
+        property: Union[str, List[str], bool, None] = None,
+        multiplier: float = None,
+        decimals: int = 6
+    ) -> 'Case':
+        """Recompute this case with different property/multiplier.
+        
+        Args:
+            property: Property override
+            multiplier: Multiplier override
+            decimals: Decimal places
+            
+        Returns:
+            New Case object with recomputed data
+            
+        Examples:
+            # Change multiplier
+            case_mm = case.recompute(multiplier=1e-6)
+            
+            # Change property
+            giip_case = case.recompute(property='giip')
+        """
+        if self.idx is None:
+            raise ValueError("Cannot recompute case without index")
+        
+        data = self._processor.case(
+            self.idx,
+            parameter=self.parameter,
+            property=property,
+            multiplier=multiplier,
+            decimals=decimals,
+            variables=True
+        )
+        
+        return Case(
+            data=data,
+            processor=self._processor,
+            index=self.idx,
+            parameter=self.parameter,
+            reference=self.reference,
+            case_type=self.case_type
+        )
+    
+    def to_dict(self, include_metadata: bool = True) -> Dict[str, Any]:
+        """Convert case to dictionary.
+        
+        Args:
+            include_metadata: Include idx, parameter, case_type
+            
+        Returns:
+            Dictionary representation
+            
+        Examples:
+            # Get raw dict
+            data = case.to_dict()
+            
+            # Get only properties and variables
+            data = case.to_dict(include_metadata=False)
+        """
+        result = {}
+        
+        if include_metadata:
+            if self.idx is not None:
+                result['idx'] = self.idx
+            if self.parameter:
+                result['parameter'] = self.parameter
+            if self.case_type:
+                result['case'] = self.case_type
+            if self.reference:
+                result['reference'] = self.reference
+        
+        result['properties'] = self._properties.copy()
+        
+        if self._variables:
+            result['variables'] = self._variables.copy()
+        
+        return result
+    
+    def keys(self) -> List[str]:
+        """Get list of property keys.
+        
+        Returns:
+            List of property names
+        """
+        return list(self._properties.keys())
+    
+    def items(self):
+        """Iterate over property items.
+        
+        Yields:
+            Tuples of (property_name, value)
+        """
+        return self._properties.items()
+    
+    def values(self):
+        """Iterate over property values.
+        
+        Yields:
+            Property values
+        """
+        return self._properties.values()
+
+
 class TornadoProcessor:
     def __init__(self, filepath: str, multiplier: float = 1.0, base_case: str = None):
         """Initialize processor with Excel file path and optional parameters.
@@ -1857,10 +2369,13 @@ class TornadoProcessor:
         property: Union[str, List[str], bool, None] = None,
         multiplier: float = None,
         decimals: int = 6,
-        variables: Union[bool, List[str]] = False,
+        as_dict: bool = False,
         _skip_filtering: bool = False
-    ) -> Dict:
+    ) -> Union['Case', Dict]:
         """Get data for a specific case by index or reference.
+        
+        Variables are always included in Case objects. Use processor.default_variables 
+        to control which variables are included by default.
         
         Args:
             index_or_reference: Case index (int) or case reference string (e.g., 'NTG_42' or 'p10.NTG_42')
@@ -1871,29 +2386,37 @@ class TornadoProcessor:
             property: Property override (see compute() for details)
             multiplier: Multiplier to apply (defaults to instance default_multiplier)
             decimals: Number of decimal places for rounding
-            variables: Control variable inclusion (default False):
-                - False (default): No variables included
-                - True: Include variables filtered by default_variables (or all if default_variables is None)
-                - List[str]: Include only specified variables ($ prefix optional, e.g., ['NPV', 'Recovery'])
+            as_dict: If True, return dict instead of Case object (default False)
             
         Returns:
-            Dictionary of volumetric values for that case. If filters provided, properties are
-            recalculated based on those filters. By default only includes properties.
-            Variables are returned without $ prefix in keys.
-            If reference has a tag prefix (e.g., 'p10.NTG_42'), adds 'case' key to result.
+            Case object (default) or dictionary of volumetric values for that case.
+            Variables are always included and filtered by default_variables if set.
+            If reference has a tag prefix (e.g., 'p10.NTG_42'), the tag is set as case_type.
             
         Raises:
             IndexError: If index out of range
             ValueError: If reference format is invalid
             
         Examples:
-            # Get case with property override
-            case_data = processor.case(42, parameter='NTG', 
-                                      filters={'zones': ['z1']}, property='stoiip')
+            # Get case object (variables always included)
+            case = processor.case(42, parameter='NTG')
+            stoiip = case.stoiip
+            npv = case.var('NPV')
             
-            # Remove property filter
-            case_data = processor.case('p10.NTG_42', 
-                                      filters={'zones': ['z1']}, property=False)
+            # Get case by reference
+            case = processor.case('p10.NTG_42')  # case_type = 'p10'
+            
+            # Get case with filters
+            case = processor.case(42, parameter='NTG', filters={'zones': ['z1']})
+            
+            # Use stored filter
+            case = processor.case('p10.NTG_42', filters='Cerisa_STOIIP')
+            
+            # Quick filtered view
+            case('North_STOIIP')  # Prints filtered case
+            
+            # Get dict (legacy)
+            case_dict = processor.case(42, parameter='NTG', as_dict=True)
         """
         tag = None
         
@@ -1912,10 +2435,12 @@ class TornadoProcessor:
         if isinstance(index_or_reference, str):
             # Reference mode
             param, index, tag = self._parse_case_reference(index_or_reference)
+            reference = index_or_reference
         else:
             # Index mode
             index = index_or_reference
             param = self._resolve_parameter(parameter)
+            reference = self._create_case_reference(param, index, tag=tag)
         
         # Set defaults
         if multiplier is None:
@@ -1951,46 +2476,45 @@ class TornadoProcessor:
         
         # Skip further filtering if this is an internal call
         if _skip_filtering:
-            return case_data
+            if as_dict:
+                return case_data
+            return Case(
+                data=case_data,
+                processor=self,
+                index=index,
+                parameter=param,
+                reference=reference,
+                case_type=tag
+            )
         
-        # Handle variables inclusion/filtering
-        if variables is False or variables is None:
-            # Remove all variables (default behavior)
-            if 'variables' in case_data:
-                del case_data['variables']
-            else:
-                # For index mode, remove $ prefixed keys
-                for k in list(case_data.keys()):
-                    if k.startswith('$'):
-                        del case_data[k]
-        elif variables is True:
-            # Include variables, filtered by default_variables if set
-            var_list = self.default_variables
-            if var_list is not None:
-                # Filter and strip $
-                self._filter_case_variables(case_data, var_list)
-            else:
-                # Include all variables, strip $ from keys
-                if 'variables' not in case_data:
-                    vars_dict = {k: v for k, v in case_data.items() if k.startswith('$')}
-                    for k in list(vars_dict.keys()):
-                        del case_data[k]
-                    case_data['variables'] = self._strip_variable_prefix(vars_dict)
-                else:
-                    # Already in variables dict, just strip $
-                    case_data['variables'] = self._strip_variable_prefix(case_data['variables'])
-        elif isinstance(variables, list):
-            # Include only specified variables
-            # First ensure variables are in 'variables' dict
+        # Always include variables (filtered by default_variables if set)
+        var_list = self.default_variables
+        if var_list is not None:
+            # Filter and strip $
+            self._filter_case_variables(case_data, var_list)
+        else:
+            # Include all variables, strip $ from keys
             if 'variables' not in case_data:
                 vars_dict = {k: v for k, v in case_data.items() if k.startswith('$')}
                 for k in list(vars_dict.keys()):
                     del case_data[k]
-                case_data['variables'] = vars_dict
-            # Filter and strip $
-            self._filter_case_variables(case_data, variables)
+                case_data['variables'] = self._strip_variable_prefix(vars_dict)
+            else:
+                # Already in variables dict, just strip $
+                case_data['variables'] = self._strip_variable_prefix(case_data['variables'])
         
-        return case_data
+        # Return Case object or dict
+        if as_dict:
+            return case_data
+        
+        return Case(
+            data=case_data,
+            processor=self,
+            index=index,
+            parameter=param,
+            reference=reference,
+            case_type=tag
+        )
     
     def _filter_case_variables(self, case_data: Dict, var_list: List[str]) -> None:
         """Filter variables in case_data dict in-place and strip $ from keys.
