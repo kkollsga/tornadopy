@@ -13,6 +13,7 @@ def tornado_plot(
     base=None,
     reference_case=None,
     unit=None,
+    filter_name=None,
     preferred_order=None,
     settings=None
 ):
@@ -29,6 +30,8 @@ def tornado_plot(
     - optional reference_case vertical line
     - preferred_order: list of parameter names to show first (in that order)
     - auto-detects base and reference_case from sections if not provided
+    - filter_name: optional filter name to display in subtitle
+    - subtitle format: "<filter name>  |  Base case: xx   Ref case: xx unit" (centered)
     """
     # Auto-detect base and reference_case from sections
     auto_base = None
@@ -103,11 +106,37 @@ def tornado_plot(
         s.update(settings)
 
     # --- Subtitle ---
+    # Format: "<filter name>  |  Base case: xx   Ref case: xx mcm"
     if subtitle is None:
         unit_str = f" {unit}" if unit else ""
-        subtitle = f"Base case = {base:.2f}{unit_str}"
+
+        # Build subtitle components
+        subtitle_parts = []
+
+        # Add filter name if provided
+        if filter_name:
+            subtitle_parts.append(filter_name)
+
+        # Build case values string
+        case_values = []
+        if base is not None:
+            case_values.append(f"Base case: {base:.2f}")
         if reference_case is not None:
-            subtitle += f" | Ref case = {reference_case:.2f}{unit_str}"
+            case_values.append(f"Ref case: {reference_case:.2f}{unit_str}")
+        elif base is not None and unit_str:
+            # Add unit to base case if no ref case
+            case_values[-1] += unit_str
+
+        if case_values:
+            subtitle_parts.append("   ".join(case_values))
+
+        # Join with separator if both filter name and case values exist
+        if filter_name and case_values:
+            subtitle = "  |  ".join(subtitle_parts)
+        elif subtitle_parts:
+            subtitle = subtitle_parts[0]
+        else:
+            subtitle = ""
 
     # --- Prepare data ---
     data = []

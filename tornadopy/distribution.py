@@ -68,7 +68,7 @@ def distribution_plot(
         ... )
         >>> # Plot will show:
         >>> # Title: "Parameter 1 distribution"  (underscores replaced with spaces)
-        >>> # Subtitle: "Cerisa | P90: 123.45 - P50: 234.56 - P10: 345.67 bcm"  (Cerisa is bold, unit only after P10)
+        >>> # Subtitle: "Cerisa  |  P90: 123.45   P50: 234.56   P10: 345.67 bcm"  (centered, unit only after P10)
         >>> # X-axis: "STOIIP (bcm)"
     """
     # Handle new dict format from processor.distribution()
@@ -169,15 +169,18 @@ def distribution_plot(
     p10 = np.percentile(distribution_data, 90)  # P10 = 90th percentile (high value)
 
     # --- Subtitle with units ---
-    # Format: "Filter name | P90: xx - P50: xx - P10: xx mcm"
+    # Format: "<filter name>  |  P90: xx   P50: xx   P10: xx mcm"
     # Only show unit after P10 value
     if unit:
         unit_str = f" {unit}"
     else:
         unit_str = ""
 
-    # Build percentiles string - unit only after P10
-    percentiles_str = f"P90: {p90:.2f} - P50: {p50:.2f} - P10: {p10:.2f}{unit_str}"
+    # Build subtitle as single string with multiple spaces
+    if filter_name:
+        subtitle = f"{filter_name}  |  P90: {p90:.2f}   P50: {p50:.2f}   P10: {p10:.2f}{unit_str}"
+    else:
+        subtitle = f"P90: {p90:.2f}   P50: {p50:.2f}   P10: {p10:.2f}{unit_str}"
 
     # --- Calculate beautiful bins ---
     def get_beautiful_bins(data, target_bins):
@@ -228,27 +231,9 @@ def distribution_plot(
     fig.text(plot_center, 0.97, title, ha="center", fontsize=s["title_fontsize"],
              fontweight="bold", color=s["text_color"])
 
-    # Render subtitle - filter name in bold if present
-    if filter_name:
-        # Render as two text objects: bold filter name and regular percentiles
-        # Estimate relative widths for positioning to center both together
-        filter_len = len(filter_name)
-        rest_len = len(f" | {percentiles_str}")
-        total_len = filter_len + rest_len
-
-        # Calculate position offset from center
-        # Offset so that the combined text appears centered
-        filter_offset = -(rest_len / total_len) * 0.12  # Adjust 0.12 based on typical text width
-        rest_offset = (filter_len / total_len) * 0.12
-
-        fig.text(plot_center + filter_offset, 0.93, filter_name, ha="right",
-                fontsize=s["subtitle_fontsize"], color=s["text_color"], alpha=0.85, fontweight="bold")
-        fig.text(plot_center + rest_offset, 0.93, f" | {percentiles_str}", ha="left",
-                fontsize=s["subtitle_fontsize"], color=s["text_color"], alpha=0.85)
-    else:
-        # No filter name, just render percentiles centered
-        fig.text(plot_center, 0.93, percentiles_str, ha="center", fontsize=s["subtitle_fontsize"],
-                 color=s["text_color"], alpha=0.85)
+    # Render subtitle centered as single string
+    fig.text(plot_center, 0.93, subtitle, ha="center", fontsize=s["subtitle_fontsize"],
+             color=s["text_color"], alpha=0.85)
 
     # --- Histogram (no gaps) ---
     counts, bin_edges, patches = ax.hist(
