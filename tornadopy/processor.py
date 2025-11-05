@@ -2388,29 +2388,13 @@ class TornadoProcessor:
     # PUBLIC API - BASE & REFERENCE CASE
     # ================================================================
     
-    def base_case(
-        self,
-        property: str = None,
-        filters: Union[Dict[str, Any], str] = None,
-        multiplier: float = None
-    ) -> Union[float, Dict[str, float]]:
-        """Get base case value(s)."""
-        filters = self.filter_manager.resolve_filter_preset(filters)
-        return self.case_manager.get_case_values(
-            'base', self.base_case_parameter, property, filters, multiplier
-        )
+    def base_case(self) -> Case:
+        """Get base case as a Case object."""
+        return self.case_manager.get_case(0, self.base_case_parameter)
     
-    def ref_case(
-        self,
-        property: str = None,
-        filters: Union[Dict[str, Any], str] = None,
-        multiplier: float = None
-    ) -> Union[float, Dict[str, float]]:
-        """Get reference case value(s)."""
-        filters = self.filter_manager.resolve_filter_preset(filters)
-        return self.case_manager.get_case_values(
-            'reference', self.base_case_parameter, property, filters, multiplier
-        )
+    def ref_case(self) -> Case:
+        """Get reference case as a Case object."""
+        return self.case_manager.get_case(1, self.base_case_parameter)
     
     # ================================================================
     # PUBLIC API - STATISTICS COMPUTATION
@@ -2862,8 +2846,25 @@ class TornadoProcessor:
         property: Union[str, List[str], bool, None] = None,
         multiplier: float = None,
         options: Dict[str, Any] = None
-    ) -> Union[np.ndarray, Dict[str, np.ndarray]]:
-        """Get full distribution of values."""
+    ) -> Union[Dict[str, Any], Dict[str, Dict[str, Any]]]:
+        """Get full distribution of values with metadata.
+
+        Returns:
+            For single property: Dict with keys:
+                - 'data': np.ndarray of distribution values
+                - 'title': str title for the distribution (format: "{parameter} distribution plot", underscores replaced with spaces)
+                - 'property': str property name
+                - 'unit': str unit string (e.g., 'mcm', 'bcm')
+                - 'parameter': str tornado parameter name (original with underscores)
+                - 'filter_name': str filter name if extracted from filter preset
+            For multiple properties: Dict mapping property names to the above dict structure
+        """
+        # Store original filter string before resolution
+        original_filter_str = filters if isinstance(filters, str) else None
+
+        # Resolve parameter
+        resolved_parameter = self._resolve_parameter(parameter)
+
         compute_result = self.compute(
             stats="distribution",
             parameter=parameter,
@@ -2872,13 +2873,76 @@ class TornadoProcessor:
             multiplier=multiplier,
             options=options
         )
-        
+
         if isinstance(compute_result, tuple):
             result_dict, _ = compute_result
         else:
             result_dict = compute_result
-        
-        return result_dict["distribution"]
+
+        distribution_data = result_dict["distribution"]
+
+        # If multiple properties, return dict of dicts
+        if isinstance(distribution_data, dict):
+            result = {}
+            for prop_name, prop_data in distribution_data.items():
+                result[prop_name] = self._create_distribution_metadata(
+                    prop_data, prop_name, original_filter_str, multiplier, resolved_parameter
+                )
+            return result
+
+        # Single property - extract property name
+        resolved_filters = self.filter_manager.resolve_filter_preset(
+            filters,
+            self.properties(resolved_parameter)
+        )
+        resolved_filters = FilterManager.merge_property_filter(resolved_filters, property)
+        property_name = resolved_filters.get('property', 'Value')
+
+        return self._create_distribution_metadata(
+            distribution_data, property_name, original_filter_str, multiplier, resolved_parameter
+        )
+
+    def _create_distribution_metadata(
+        self,
+        data: np.ndarray,
+        property_name: str,
+        filter_str: str = None,
+        _multiplier: float = None,
+        parameter: str = None
+    ) -> Dict[str, Any]:
+        """Create distribution metadata dict."""
+        # Extract filter name if filter string provided
+        filter_name = None
+        if filter_str and isinstance(filter_str, str):
+            if '_' in filter_str:
+                parts = filter_str.rsplit('_', 1)
+                if len(parts) == 2:
+                    base_filter_name, _ = parts
+                    # Check if this looks like a filter_property pattern
+                    if base_filter_name in self.filter_manager.stored_filters:
+                        filter_name = base_filter_name
+            elif filter_str in self.filter_manager.stored_filters:
+                filter_name = filter_str
+
+        # Get unit string
+        unit = self.unit_manager.get_display_unit(property_name)
+
+        # Create title - format: "{parameter} distribution plot"
+        # Replace underscores with spaces in parameter name
+        if parameter:
+            parameter_display = parameter.replace('_', ' ')
+            title = f"{parameter_display} distribution plot"
+        else:
+            title = "Distribution plot"
+
+        return {
+            'data': data,
+            'title': title,
+            'property': property_name,
+            'unit': unit,
+            'parameter': parameter,
+            'filter_name': filter_name
+        }
     
     # ================================================================
     # PUBLIC API - FILTER & CACHE MANAGEMENT

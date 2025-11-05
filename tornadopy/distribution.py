@@ -7,7 +7,7 @@ from matplotlib.ticker import AutoMinorLocator, MultipleLocator
 
 def distribution_plot(
     data,
-    title="Distribution",
+    title=None,
     unit=None,
     outfile=None,
     target_bins=20,
@@ -31,9 +31,11 @@ def distribution_plot(
     - Manual gridline interval control
 
     Args:
-        data: Array-like data (numpy array, list, or pandas Series)
-        title: Chart title
-        unit: Unit label for x-axis and subtitle
+        data: Either:
+            - Dict with keys 'data', 'title', 'property', 'unit', 'parameter', 'filter_name' (from processor.distribution())
+            - Array-like data (numpy array, list, or pandas Series) for legacy support
+        title: Chart title (optional if data is dict with 'title' key, format: "{parameter} distribution plot")
+        unit: Unit label for x-axis and subtitle (optional if data is dict with 'unit' key)
         outfile: Output file path (if specified, saves the figure)
         target_bins: Target number of bins for histogram (default 20)
         color: Color scheme - "red", "blue", "green", "orange", "purple", "fuchsia", "yellow"
@@ -49,18 +51,42 @@ def distribution_plot(
     Example:
         >>> from tornadopy import TornadoProcessor, distribution_plot
         >>> processor = TornadoProcessor("data.xlsb")
-        >>> dist = processor.get_distribution(
+        >>> dist = processor.distribution(
         ...     parameter="Parameter1",
-        ...     filters={"property": "npv"},
-        ...     multiplier=1e-6
+        ...     filters="Cerisa_STOIIP"
         ... )
+        >>> # dist is now a dict with:
+        >>> # {'data': array([...]),
+        >>> #  'title': 'Parameter 1 distribution plot',
+        >>> #  'property': 'stoiip',
+        >>> #  'unit': 'bcm',
+        >>> #  'parameter': 'Parameter_1',
+        >>> #  'filter_name': 'Cerisa'}
         >>> fig, ax, saved = distribution_plot(
         ...     dist,
-        ...     title="NPV Distribution",
-        ...     unit="MM USD",
-        ...     outfile="npv_distribution.png"
+        ...     outfile="distribution.png"
         ... )
+        >>> # Plot will show:
+        >>> # Title: "Parameter 1 distribution plot"  (underscores replaced with spaces)
+        >>> # Subtitle: "Cerisa | P90: 123.45 bcm - P50: 234.56 bcm - P10: 345.67 bcm"
+        >>> # X-axis: "STOIIP (bcm)"
     """
+    # Handle new dict format from processor.distribution()
+    if isinstance(data, dict) and 'data' in data:
+        distribution_data = data['data']
+        if title is None:
+            title = data.get('title', 'Distribution')
+        if unit is None:
+            unit = data.get('unit', None)
+        property_name = data.get('property', 'Value')
+        filter_name = data.get('filter_name', None)
+    else:
+        # Legacy format: data is array-like
+        distribution_data = data
+        property_name = 'Value'
+        filter_name = None
+        if title is None:
+            title = "Distribution"
     # --- Color schemes ---
     color_map = {
         "red": {"light": "#FB877A", "dark": "#BA2A19"},
@@ -131,20 +157,32 @@ def distribution_plot(
         s.update(settings)
 
     # --- Convert data to numpy array ---
-    data = np.array(data)
-    data = data[np.isfinite(data)]  # Remove NaN/Inf
+    distribution_data = np.array(distribution_data)
+    distribution_data = distribution_data[np.isfinite(distribution_data)]  # Remove NaN/Inf
 
-    if len(data) == 0:
+    if len(distribution_data) == 0:
         raise ValueError("No valid data points")
 
     # --- Calculate percentiles ---
-    p90 = np.percentile(data, 10)  # P90 = 10th percentile (low value)
-    p50 = np.percentile(data, 50)  # P50 = 50th percentile (median)
-    p10 = np.percentile(data, 90)  # P10 = 90th percentile (high value)
+    p90 = np.percentile(distribution_data, 10)  # P90 = 10th percentile (low value)
+    p50 = np.percentile(distribution_data, 50)  # P50 = 50th percentile (median)
+    p10 = np.percentile(distribution_data, 90)  # P10 = 90th percentile (high value)
 
-    # --- Subtitle ---
-    unit_str = f" {unit}" if unit else ""
-    subtitle = f"P90 = {p90:.2f}{unit_str}  |  P50 = {p50:.2f}{unit_str}  |  P10 = {p10:.2f}{unit_str}"
+    # --- Subtitle with units ---
+    # Format: "Filter name | P90: xx mcm - P50: xx mcm - P10: xx mcm"
+    if unit:
+        unit_str = f" {unit}"
+    else:
+        unit_str = ""
+
+    subtitle_parts = []
+    if filter_name:
+        subtitle_parts.append(filter_name)
+
+    percentiles_str = f"P90: {p90:.2f}{unit_str} - P50: {p50:.2f}{unit_str} - P10: {p10:.2f}{unit_str}"
+    subtitle_parts.append(percentiles_str)
+
+    subtitle = " | ".join(subtitle_parts)
 
     # --- Calculate beautiful bins ---
     def get_beautiful_bins(data, target_bins):
@@ -175,7 +213,7 @@ def distribution_plot(
 
         return bins
 
-    bins = get_beautiful_bins(data, target_bins)
+    bins = get_beautiful_bins(distribution_data, target_bins)
 
     # --- Figure setup ---
     plt.close("all")
@@ -199,7 +237,7 @@ def distribution_plot(
 
     # --- Histogram (no gaps) ---
     counts, bin_edges, patches = ax.hist(
-        data,
+        distribution_data,
         bins=bins,
         color=s["bar_color"],
         edgecolor=s["bar_outline_color"],
@@ -259,7 +297,7 @@ def distribution_plot(
 
     # --- Cumulative curve (% with higher value) ---
     # Sort data and calculate cumulative percentages
-    sorted_data = np.sort(data)
+    sorted_data = np.sort(distribution_data)
     n = len(sorted_data)
 
     # For each value, calculate what % of cases have HIGHER value
@@ -327,7 +365,13 @@ def distribution_plot(
     ax2.yaxis.set_major_formatter(plt.FuncFormatter(lambda y, _: f'{y:.0f}%'))
 
     # --- Axis labels ---
-    ax.set_xlabel(unit or "Value", fontsize=s["label_fontsize"], color=s["text_color"])
+    # Create x-axis label with property and unit
+    if unit:
+        x_label = f"{property_name.upper() if property_name.lower() in ['npv', 'stoiip', 'giip', 'hcpv'] else property_name.title()} ({unit})"
+    else:
+        x_label = property_name.title() if property_name else "Value"
+
+    ax.set_xlabel(x_label, fontsize=s["label_fontsize"], color=s["text_color"])
     ax.set_ylabel("Frequency", fontsize=s["label_fontsize"], color=s["text_color"])
 
     # --- Axis styling ---
