@@ -2125,7 +2125,20 @@ class StatisticsComputer:
             error_msg += f"\nRequested: {variables}\n"
             error_msg += f"Available: {[v.lstrip('$') for v in available_vars]}"
             raise ValueError(error_msg)
-        
+
+        # Calculate min/max ranges for each variable
+        variable_ranges = []
+        for var_values in variable_data:
+            # Get finite values only (exclude NaN)
+            finite_values = var_values[np.isfinite(var_values)]
+            if len(finite_values) > 0:
+                var_min = np.min(finite_values)
+                var_max = np.max(finite_values)
+                variable_ranges.append((float(var_min), float(var_max)))
+            else:
+                # No finite values
+                variable_ranges.append((None, None))
+
         # Compute correlation matrix: rows = variables, cols = properties
         n_vars = len(variable_data)
         n_props = len(property_data)
@@ -2151,6 +2164,7 @@ class StatisticsComputer:
             'variables': variable_labels,
             'properties': property_labels,
             'n_cases': n_cases,
+            'variable_ranges': variable_ranges,
             'constant_variables': constant_variables if constant_variables else None,
             'skipped_variables': skipped_variables if skipped_variables else None
         }
@@ -2707,6 +2721,7 @@ class TornadoProcessor:
                 - 'variables': List of variable names (y-axis labels) - includes constant variables
                 - 'properties': List of property names with units (x-axis labels)
                 - 'n_cases': Number of cases used in correlation calculation
+                - 'variable_ranges': List of (min, max) tuples for each variable
                 - 'constant_variables': List of (variable, value) tuples for zero-variance variables (None if none found)
                 - 'skipped_variables': List of (variable, reason) tuples for non-numeric variables (None if all included)
         

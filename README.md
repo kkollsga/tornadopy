@@ -9,6 +9,7 @@ TornadoPy provides efficient data processing and visualization tools for analyzi
 - Fast processing of Excel-based uncertainty analysis results using Polars
 - Generate tornado charts showing parameter sensitivities
 - Create distribution plots with cumulative curves
+- **Correlation matrix visualization** for variable-property relationships
 - Support for complex filtering and data aggregation
 - Statistical computations (P90/P10, mean, median, percentiles)
 - **Intelligent case selection** for representative scenarios
@@ -24,7 +25,7 @@ pip install tornadopy
 ## Quick Start
 
 ```python
-from tornadopy import TornadoProcessor, tornado_plot, distribution_plot
+from tornadopy import TornadoProcessor, tornado_plot, distribution_plot, correlation_plot
 
 # Load data from Excel file
 processor = TornadoProcessor("uncertainty_results.xlsx", multiplier=1e-6)
@@ -370,6 +371,50 @@ dist = processor.distribution(
 fig, ax, saved = distribution_plot(dist, title="Net Pay", unit="MM bbl")
 ```
 
+### Correlation Matrix Analysis
+
+Analyze relationships between input variables and output properties using Pearson correlation coefficients.
+
+```python
+# Compute correlation matrix
+corr_data = processor.correlation_grid(
+    parameter='Full_Uncertainty',
+    filters={'zones': ['north_main', 'north_flank']},
+    variables=['Porosity', 'NTG', 'NetPay', 'GOCcase', 'FWLcase']
+)
+
+# Returns dictionary with:
+# - 'matrix': 2D numpy array of correlation coefficients
+# - 'variables': List of variable names (y-axis)
+# - 'properties': List of property names with units (x-axis)
+# - 'variable_ranges': Min/max ranges for each variable
+# - 'n_cases': Number of cases analyzed
+# - 'constant_variables': Variables with no variation (if any)
+
+# Display variable ranges
+for i, var in enumerate(corr_data['variables']):
+    var_min, var_max = corr_data['variable_ranges'][i]
+    print(f"{var}: [{var_min:.2f} - {var_max:.2f}]")
+
+# Create correlation heatmap
+fig, ax, saved = correlation_plot(
+    corr_data,
+    outfile="correlation_matrix.png"
+)
+```
+
+**Key Features:**
+- **Pearson correlations** between all input variables and volumetric properties
+- **Automatic min/max calculation** for each variable (displayed below variable names)
+- **Smart null handling** - filters out NaN, Inf, and invalid values
+- **Constant variable detection** - identifies variables with zero variance
+- **Color-coded visualization** - blue (negative), white (neutral), red (positive)
+
+**Correlation Coefficient Scale:**
+- `+1.0` = Perfect positive correlation (variable ↑ → property ↑)
+- `-1.0` = Perfect negative correlation (variable ↑ → property ↓)
+- `0.0` = No linear correlation
+
 ## Plotting
 
 ### Tornado Plot
@@ -473,10 +518,69 @@ fig, ax, saved = distribution_plot(
 )
 ```
 
+### Correlation Matrix Plot
+
+```python
+from tornadopy import correlation_plot
+
+# Basic correlation plot
+fig, ax, saved = correlation_plot(
+    corr_data,
+    outfile="correlation.png"
+)
+
+# High-resolution plot with custom settings
+fig, ax, saved = correlation_plot(
+    corr_data,
+    outfile="correlation_hires.png",
+    settings={
+        'figsize': (14, 10),
+        'dpi': 200,
+        'title_fontsize': 16,
+        'show_values': True
+    }
+)
+```
+
+**Key Visual Features:**
+- **White background** with clean professional appearance
+- **Blue-white-red colormap** (negative → neutral → positive correlations)
+- **Smart text colors** - dark grey/black for weak correlations, white for strong
+- **Variable ranges** displayed below each variable name in dark grey
+- **Bold property names** at bottom (horizontal layout)
+- **Correlation values** displayed in each cell (optional)
+
+**Customization:**
+
+```python
+custom_settings = {
+    'figsize': (14, 10),
+    'dpi': 200,
+    'title_fontsize': 16,
+    'xlabel_fontsize': 9,
+    'ylabel_fontsize': 9,
+    'value_fontsize': 7,
+    'show_values': True,           # Display correlation values
+    'value_threshold': 0.1,         # Only show values >= 0.1
+    'cmap_colors': ['#2E5BFF', 'white', '#E74C3C'],  # Blue-White-Red
+}
+
+fig, ax, saved = correlation_plot(
+    corr_data,
+    settings=custom_settings
+)
+```
+
+**Key Settings:**
+- **Sizes**: `figsize`, `dpi`
+- **Fonts**: `title_fontsize`, `subtitle_fontsize`, `xlabel_fontsize`, `ylabel_fontsize`, `value_fontsize`
+- **Colors**: `cmap_colors`, `figure_bg_color`, `plot_bg_color`, `text_color`
+- **Display**: `show_values`, `value_threshold`
+
 ## Complete Workflow Example
 
 ```python
-from tornadopy import TornadoProcessor, tornado_plot, distribution_plot
+from tornadopy import TornadoProcessor, tornado_plot, distribution_plot, correlation_plot
 
 # 1. Initialize
 processor = TornadoProcessor(
@@ -524,7 +628,20 @@ fig, ax, saved = distribution_plot(
     outfile="netpay_distribution.png"
 )
 
-# 5. Extract representative cases
+# 5. Analyze correlations between variables and properties
+corr_data = processor.correlation_grid(
+    parameter='Full_Uncertainty',
+    filters='north_zones',
+    variables=['NetPay', 'Porosity', 'NTG', 'GOCcase', 'FWLcase']
+)
+
+fig, ax, saved = correlation_plot(
+    corr_data,
+    outfile="correlation_analysis.png",
+    settings={'figsize': (14, 10), 'dpi': 200}
+)
+
+# 6. Extract representative cases
 result = processor.compute(
     stats='p90p10',
     parameter='NetPay',
@@ -561,6 +678,8 @@ TornadoProcessor(filepath, multiplier=1.0, base_case=None)
 .compute_batch(stats, parameters='all', filters=None, ...)
 .tornado(filters=None, multiplier=None, ...)
 .distribution(parameter=None, filters=None, ...)
+.correlation_grid(parameter=None, filters=None, variables=None,
+                  multiplier=None, decimals=2)
 ```
 
 **Base Cases:**
@@ -591,6 +710,11 @@ tornado_plot(sections, title="Tornado Chart", subtitle=None,
 distribution_plot(data, title="Distribution", unit=None,
                   outfile=None, target_bins=20, color="blue",
                   reference_case=None, settings=None)
+```
+
+**correlation_plot:**
+```python
+correlation_plot(correlation_data, outfile=None, settings=None)
 ```
 
 ## Requirements
