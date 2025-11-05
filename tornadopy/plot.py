@@ -191,7 +191,7 @@ def tornado_plot(
 
     # For reference case label (should be just outside plot area, above first bar)
     # Place it slightly above ymin (more negative since axis is inverted)
-    ref_case_offset = y_padding + 0.3  # Just outside the plot boundary
+    ref_case_offset = y_padding + 0.1  # Just outside the plot boundary
 
     # --- Titles ---
     plot_box = ax.get_position()
