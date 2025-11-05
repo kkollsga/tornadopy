@@ -2556,9 +2556,14 @@ class TornadoProcessor:
         if self.base_case_parameter and (include_base_case or include_reference_case):
             case_entry = {"parameter": self.base_case_parameter}
 
-            # Add filter_name if present in options
-            if options and 'filter_name' in options:
-                case_entry['filter_name'] = options['filter_name']
+            # Add metadata if present in options
+            if options:
+                if 'filter_name' in options:
+                    case_entry['filter_name'] = options['filter_name']
+                if 'property_name' in options:
+                    case_entry['property_name'] = options['property_name']
+                if 'unit' in options:
+                    case_entry['unit'] = options['unit']
 
             # Extract property from filters
             prop_to_use = None
@@ -2861,22 +2866,44 @@ class TornadoProcessor:
                 existing_skip = [existing_skip]
             merged_options['skip'] = list(set(existing_skip + skip_list))
 
-        # Extract filter name for tornado plot metadata
+        # Extract filter name and property for tornado plot metadata
         filter_name = None
+        property_name = None
         original_filter_str = filters if isinstance(filters, str) else None
         if original_filter_str:
             if '_' in original_filter_str:
                 parts = original_filter_str.rsplit('_', 1)
                 if len(parts) == 2:
-                    base_filter_name, _ = parts
+                    base_filter_name, prop_part = parts
                     if base_filter_name in self.filter_manager.stored_filters:
                         filter_name = base_filter_name
+                        property_name = prop_part.replace('-', ' ')
             elif original_filter_str in self.filter_manager.stored_filters:
                 filter_name = original_filter_str
 
-        # Store filter_name in options to pass through
+        # Resolve filters to extract property if not already extracted
+        if property_name is None:
+            resolved_filters = self.filter_manager.resolve_filter_preset(filters)
+            resolved_filters = FilterManager.merge_property_filter(resolved_filters, property)
+            if resolved_filters and 'property' in resolved_filters:
+                prop_filter = resolved_filters['property']
+                if isinstance(prop_filter, str):
+                    property_name = prop_filter
+                elif isinstance(prop_filter, list) and len(prop_filter) > 0:
+                    property_name = prop_filter[0]
+
+        # Get unit for property
+        unit = None
+        if property_name:
+            unit = self.unit_manager.get_display_unit(property_name)
+
+        # Store metadata in options to pass through
         if filter_name:
             merged_options['filter_name'] = filter_name
+        if property_name:
+            merged_options['property_name'] = property_name
+        if unit:
+            merged_options['unit'] = unit
 
         return self.compute_batch(
             stats=['minmax', 'p90p10'],

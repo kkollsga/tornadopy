@@ -29,14 +29,16 @@ def tornado_plot(
     - automatic space checking for p10/p90 labels (prefers largest space)
     - optional reference_case vertical line
     - preferred_order: list of parameter names to show first (in that order)
-    - auto-detects base and reference_case from sections if not provided
-    - filter_name: optional filter name to display in subtitle
-    - subtitle format: "<filter name>  |  Base case: xx   Ref case: xx unit" (centered)
+    - auto-detects base, reference_case, filter_name, property_name, and unit from sections
+    - subtitle format: "<filter name>  |  Base case: xx   Ref case: xx unit" (centered, unit after last value)
+    - x-axis label format: "PROPERTY (unit)" e.g., "STOIIP (mcm)"
     """
-    # Auto-detect base, reference_case, and filter_name from sections
+    # Auto-detect base, reference_case, filter_name, property_name, and unit from sections
     auto_base = None
     auto_reference = None
     auto_filter_name = None
+    auto_property_name = None
+    auto_unit = None
 
     for sec in sections:
         if "base_case" in sec:
@@ -45,8 +47,13 @@ def tornado_plot(
             auto_reference = sec.get("reference_case")
         if "filter_name" in sec:
             auto_filter_name = sec.get("filter_name")
+        if "property_name" in sec:
+            auto_property_name = sec.get("property_name")
+        if "unit" in sec:
+            auto_unit = sec.get("unit")
         # Stop after finding the first entry with these values
-        if auto_base is not None or auto_reference is not None or auto_filter_name is not None:
+        if any([auto_base is not None, auto_reference is not None, auto_filter_name is not None,
+                auto_property_name is not None, auto_unit is not None]):
             break
 
     # Use auto-detected values if not explicitly provided
@@ -61,6 +68,10 @@ def tornado_plot(
 
     if filter_name is None and auto_filter_name is not None:
         filter_name = auto_filter_name
+
+    # Use auto-detected property_name and unit
+    property_name = auto_property_name
+    detected_unit = auto_unit
     # --- Default settings ---
     s = {
         "figsize": (10, 7),
@@ -114,7 +125,9 @@ def tornado_plot(
     # --- Subtitle ---
     # Format: "<filter name>  |  Base case: xx   Ref case: xx mcm"
     if subtitle is None:
-        unit_str = f" {unit}" if unit else ""
+        # Use provided unit or auto-detected unit
+        unit_to_use = unit if unit is not None else detected_unit
+        unit_str = f" {unit_to_use}" if unit_to_use else ""
 
         # Build subtitle components
         subtitle_parts = []
@@ -235,31 +248,9 @@ def tornado_plot(
     fig.text(plot_center, 0.97, title, ha="center", fontsize=s["title_fontsize"],
              fontweight="bold", color=s["label_color"])
 
-    # Render subtitle - make filter name bold if present
-    if filter_name and subtitle.startswith(filter_name):
-        # Split subtitle into bold filter name and regular rest
-        rest_of_subtitle = subtitle[len(filter_name):]
-
-        # Estimate relative widths for positioning to center both together
-        # Use character-based width estimation (monospace approximation)
-        filter_len = len(filter_name)
-        rest_len = len(rest_of_subtitle)
-        total_len = filter_len + rest_len
-
-        # Calculate position offset from center to keep combined text centered
-        # Use smaller multiplier for tighter spacing
-        char_width_approx = 0.006  # Approximate character width in figure coordinates
-        filter_offset = -(rest_len * char_width_approx / 2)
-        rest_offset = (filter_len * char_width_approx / 2)
-
-        fig.text(plot_center + filter_offset, 0.93, filter_name, ha="right",
-                fontsize=s["subtitle_fontsize"], color=s["label_color"], alpha=0.85, fontweight="bold")
-        fig.text(plot_center + rest_offset, 0.93, rest_of_subtitle, ha="left",
-                fontsize=s["subtitle_fontsize"], color=s["label_color"], alpha=0.85)
-    else:
-        # No filter name or custom subtitle - render as single centered text
-        fig.text(plot_center, 0.93, subtitle, ha="center", fontsize=s["subtitle_fontsize"],
-                 color=s["label_color"], alpha=0.85)
+    # Render subtitle centered as single string
+    fig.text(plot_center, 0.93, subtitle, ha="center", fontsize=s["subtitle_fontsize"],
+             color=s["label_color"], alpha=0.85)
 
     # --- Gridlines ---
     ax.xaxis.set_major_formatter(FormatStrFormatter('%.2f'))
@@ -460,7 +451,21 @@ def tornado_plot(
     ax.set_xlim(xmin, xmax)
     ax.set_ylim(ymax, ymin)  # Reversed to create inverted axis (top to bottom)
     ax.set_yticks([])
-    ax.set_xlabel(unit or "Effect", fontsize=10, color=s["label_color"])
+
+    # Create x-axis label with property name and unit
+    if property_name and detected_unit:
+        # Format: "STOIIP (mcm)"
+        prop_display = property_name.upper() if property_name.lower() in ['npv', 'stoiip', 'giip', 'hcpv'] else property_name.title()
+        xlabel = f"{prop_display} ({detected_unit})"
+    elif property_name:
+        prop_display = property_name.upper() if property_name.lower() in ['npv', 'stoiip', 'giip', 'hcpv'] else property_name.title()
+        xlabel = prop_display
+    elif unit:
+        xlabel = unit
+    else:
+        xlabel = "Effect"
+
+    ax.set_xlabel(xlabel, fontsize=10, color=s["label_color"])
     for spine in ax.spines.values():
         spine.set_color(s["outline_color"])
         spine.set_linewidth(1.1)
