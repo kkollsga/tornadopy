@@ -1060,7 +1060,13 @@ class CaseManager:
     ) -> Dict[str, float]:
         """Extract values for a specific case index."""
         if parameter not in self.processor.data:
-            return {}
+            available = list(self.processor.data.keys())
+            raise KeyError(
+                f"Base case sheet '{parameter}' not found in Excel file. "
+                f"Available sheets: {available}. "
+                f"Either create a sheet named '{parameter}' or specify the correct "
+                f"base_case parameter when initializing TornadoProcessor."
+            )
         
         case_df = self.processor.data[parameter]
         if len(case_df) <= case_index:
@@ -1353,8 +1359,18 @@ class CaseManager:
                 index, param, filters, None, decimals=6
             )
         else:
+            # Check if parameter exists in data
+            if param not in self.processor.data:
+                available = list(self.processor.data.keys())
+                raise KeyError(
+                    f"Base case sheet '{param}' not found in Excel file. "
+                    f"Available sheets: {available}. "
+                    f"Either create a sheet named '{param}' or specify the correct "
+                    f"base_case parameter when initializing TornadoProcessor."
+                )
+
             df = self.processor.data[param]
-            
+
             if index < 0 or index >= len(df):
                 raise IndexError(f"Index {index} out of range (0–{len(df)-1})")
             
