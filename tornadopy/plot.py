@@ -123,14 +123,15 @@ def tornado_plot(
         if filter_name:
             subtitle_parts.append(filter_name)
 
-        # Build case values string
+        # Build case values string with unit after last value
         case_values = []
         if base is not None:
             case_values.append(f"Base case: {base:.2f}")
         if reference_case is not None:
-            case_values.append(f"Ref case: {reference_case:.2f}{unit_str}")
-        elif base is not None and unit_str:
-            # Add unit to base case if no ref case
+            case_values.append(f"Ref case: {reference_case:.2f}")
+
+        # Add unit to the last value (ref case if exists, otherwise base case)
+        if case_values and unit_str:
             case_values[-1] += unit_str
 
         if case_values:
@@ -240,13 +241,16 @@ def tornado_plot(
         rest_of_subtitle = subtitle[len(filter_name):]
 
         # Estimate relative widths for positioning to center both together
+        # Use character-based width estimation (monospace approximation)
         filter_len = len(filter_name)
         rest_len = len(rest_of_subtitle)
         total_len = filter_len + rest_len
 
         # Calculate position offset from center to keep combined text centered
-        filter_offset = -(rest_len / total_len) * 0.15
-        rest_offset = (filter_len / total_len) * 0.15
+        # Use smaller multiplier for tighter spacing
+        char_width_approx = 0.006  # Approximate character width in figure coordinates
+        filter_offset = -(rest_len * char_width_approx / 2)
+        rest_offset = (filter_len * char_width_approx / 2)
 
         fig.text(plot_center + filter_offset, 0.93, filter_name, ha="right",
                 fontsize=s["subtitle_fontsize"], color=s["label_color"], alpha=0.85, fontweight="bold")

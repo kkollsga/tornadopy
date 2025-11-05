@@ -237,13 +237,16 @@ def distribution_plot(
         rest_of_subtitle = subtitle[len(filter_name):]
 
         # Estimate relative widths for positioning to center both together
+        # Use character-based width estimation (monospace approximation)
         filter_len = len(filter_name)
         rest_len = len(rest_of_subtitle)
         total_len = filter_len + rest_len
 
         # Calculate position offset from center to keep combined text centered
-        filter_offset = -(rest_len / total_len) * 0.15
-        rest_offset = (filter_len / total_len) * 0.15
+        # Use smaller multiplier for tighter spacing
+        char_width_approx = 0.006  # Approximate character width in figure coordinates
+        filter_offset = -(rest_len * char_width_approx / 2)
+        rest_offset = (filter_len * char_width_approx / 2)
 
         fig.text(plot_center + filter_offset, 0.93, filter_name, ha="right",
                 fontsize=s["subtitle_fontsize"], color=s["text_color"], alpha=0.85, fontweight="bold")
