@@ -2746,6 +2746,7 @@ class TornadoProcessor:
                 - 'variables': List of variable names (y-axis labels) - includes constant variables
                 - 'properties': List of property names with units (x-axis labels)
                 - 'n_cases': Number of cases used in correlation calculation
+                - 'filter_name': Filter name extracted from filter string (if present)
                 - 'variable_ranges': List of (min, max) tuples for each variable
                 - 'constant_variables': List of (variable, value) tuples for zero-variance variables (None if none found)
                 - 'skipped_variables': List of (variable, reason) tuples for non-numeric variables (None if all included)
@@ -2823,21 +2824,40 @@ class TornadoProcessor:
         
         # Normalize variable names (strip $ prefix)
         variables_normalized = [v.lstrip('$') for v in variables]
-        
+
+        # Extract filter name before resolving filters
+        filter_name = None
+        original_filter_str = filters if isinstance(filters, str) else None
+        if original_filter_str:
+            if '_' in original_filter_str:
+                parts = original_filter_str.rsplit('_', 1)
+                if len(parts) == 2:
+                    base_filter_name, _ = parts
+                    if base_filter_name in self.filter_manager.stored_filters:
+                        filter_name = base_filter_name
+            elif original_filter_str in self.filter_manager.stored_filters:
+                filter_name = original_filter_str
+
         # Resolve filters
         if filters is not None:
             filters = self.filter_manager.resolve_filter_preset(filters)
         else:
             filters = {}
-        
+
         # Delegate to StatisticsComputer
-        return self.statistics_computer.compute_correlation_grid(
+        result = self.statistics_computer.compute_correlation_grid(
             parameter=resolved,
             variables=variables_normalized,
             filters=filters,
             multiplier=multiplier,
             decimals=decimals
         )
+
+        # Add filter_name to result if present
+        if filter_name:
+            result['filter_name'] = filter_name
+
+        return result
     
     # ================================================================
     # PUBLIC API - CONVENIENCE METHODS

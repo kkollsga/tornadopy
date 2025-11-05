@@ -29,6 +29,7 @@ def correlation_plot(
         - 'variables': list, y-axis labels (input variables)
         - 'properties': list, x-axis labels (output properties with units)
         - 'n_cases': int, number of cases analyzed
+        - 'filter_name': str, filter name (optional)
         - 'constant_variables': list of tuples (optional)
         - 'skipped_variables': list (optional)
 
@@ -259,18 +260,18 @@ def correlation_plot(
             va='bottom')
 
     # Add subtitle with metadata
+    # Format: "<filter name>  |  n = <count>"
+    filter_name = correlation_data.get('filter_name')
     subtitle_parts = []
+
+    if filter_name:
+        subtitle_parts.append(filter_name)
+
     if n_cases:
         subtitle_parts.append(f"n = {n_cases}")
-    if constant_variables:
-        const_names = [f"{name.replace('_', ' ')}" for name, _ in constant_variables]
-        if len(const_names) <= 3:
-            subtitle_parts.append(f"Constant: {', '.join(const_names)}")
-        else:
-            subtitle_parts.append(f"Constant: {len(const_names)} variables")
 
     if subtitle_parts:
-        subtitle = " | ".join(subtitle_parts)
+        subtitle = "  |  ".join(subtitle_parts)
         subtitle_y = 1.04
         ax.text(0.5, subtitle_y, subtitle,
                 transform=ax.transAxes,
