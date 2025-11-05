@@ -26,7 +26,7 @@ class UnitManager:
             'net volume': 1e-6,       # mcm
             'pore volume': 1e-6,      # mcm
             'hcpv oil': 1e-6,         # mcm
-            'hcpv gas': 1e-9,         # bcm
+            'hcpv gas': 1e-6,         # mcm
             'stoiip': 1e-6,           # mcm
             'stoiip (in oil)': 1e-6,  # mcm
             'stoiip (in gas)': 1e-6,  # mcm
@@ -2000,6 +2000,160 @@ class StatisticsComputer:
             closest_cases.extend(found_cases)
         
         return closest_cases
+    
+    def compute_correlation_grid(
+        self,
+        parameter: str,
+        variables: List[str],
+        filters: Dict[str, Any],
+        multiplier: float,
+        decimals: int
+    ) -> Dict[str, Any]:
+        """Compute Pearson correlation matrix between variables and properties.
+        
+        Args:
+            parameter: Parameter name
+            variables: List of variable names (without $ prefix)
+            filters: Base filters (property key will be removed)
+            multiplier: Optional display multiplier override
+            decimals: Decimal places for correlation coefficients
+            
+        Returns:
+            Dictionary with correlation matrix and labels
+        """
+        # Define volumetric properties in logical order (same as Case.parameters)
+        volumetric_properties = [
+            'bulk volume',      # GRV
+            'net volume',       # NTG
+            'pore volume',      # Por
+            'hcpv oil',         # So
+            'hcpv gas',         # Sg
+            'stoiip (in oil)',  # Bo, Rs
+            'stoiip (in gas)',  # Rs
+            'giip (in oil)',    # Rs
+            'giip (in gas)'     # Bg, Rv
+        ]
+        
+        # Remove property from filters
+        base_filters = {k: v for k, v in filters.items() if k != 'property'}
+        
+        # Get data for this parameter
+        df = self.processor.data[parameter]
+        n_cases = len(df)
+        
+        # Extract all properties
+        property_data = []
+        property_labels = []
+        
+        for prop in volumetric_properties:
+            try:
+                prop_filters = {**base_filters, 'property': prop}
+                cache_key = self.processor._create_cache_key(parameter, prop_filters)
+                values, _ = self.data_extractor.extract_values(
+                    self.processor.data[parameter],
+                    self.processor.metadata[parameter],
+                    self.processor.dynamic_fields[parameter],
+                    parameter,
+                    prop_filters,
+                    cache_key
+                )
+                
+                # Format for display
+                formatted_values = np.array([
+                    self.unit_manager.format_for_display(
+                        prop, v, decimals=6, override_multiplier=multiplier
+                    ) for v in values
+                ])
+                
+                property_data.append(formatted_values)
+                
+                # Create label with unit
+                unit = self.unit_manager.get_display_unit(prop)
+                label = f"{prop} [{unit}]" if unit else prop
+                property_labels.append(label)
+                
+            except Exception:
+                # Skip properties that can't be extracted
+                pass
+        
+        if not property_data:
+            raise ValueError(
+                f"No volumetric properties could be extracted for parameter '{parameter}'. "
+                f"Available properties: {self.processor.properties(parameter)}"
+            )
+        
+        # Extract all variables (only numeric ones for correlation)
+        variable_data = []
+        variable_labels = []
+        constant_variables = []  # Track zero-variance variables
+        skipped_variables = []
+        
+        for var in variables:
+            var_col = f'${var}'
+            if var_col in df.columns:
+                # Try to cast to float - if it works, it's numeric
+                try:
+                    values = df.select(pl.col(var_col).cast(pl.Float64, strict=False)).to_series().to_numpy()
+                    
+                    # Check if we actually got numeric data (not all NaN)
+                    if not np.isfinite(values).any():
+                        skipped_variables.append((var, "no valid numeric data"))
+                        continue
+                    
+                    # Check for zero variance (constant values)
+                    # Include them but track for reporting
+                    variance = np.var(values[np.isfinite(values)])
+                    if variance < 1e-10:  # Essentially zero
+                        unique_vals = np.unique(values[np.isfinite(values)])
+                        if len(unique_vals) == 1:
+                            constant_variables.append((var, float(unique_vals[0])))
+                    
+                    variable_data.append(values)
+                    variable_labels.append(var)
+                    
+                except Exception as e:
+                    # If casting fails, it's probably a string column
+                    skipped_variables.append((var, "non-numeric (string) data"))
+            else:
+                skipped_variables.append((var, "variable not found"))
+        
+        if not variable_data:
+            available_vars = [c for c in df.columns if c.startswith('$')]
+            error_msg = f"No valid numeric variables could be extracted. "
+            if skipped_variables:
+                error_msg += f"\nSkipped variables: {[f'{v} ({reason})' for v, reason in skipped_variables]}"
+            error_msg += f"\nRequested: {variables}\n"
+            error_msg += f"Available: {[v.lstrip('$') for v in available_vars]}"
+            raise ValueError(error_msg)
+        
+        # Compute correlation matrix: rows = variables, cols = properties
+        n_vars = len(variable_data)
+        n_props = len(property_data)
+        corr_matrix = np.zeros((n_vars, n_props))
+        
+        # Suppress warnings for invalid values (expected for constant variables)
+        with np.errstate(divide='ignore', invalid='ignore'):
+            for i, var_values in enumerate(variable_data):
+                for j, prop_values in enumerate(property_data):
+                    # Compute Pearson correlation coefficient
+                    corr = np.corrcoef(var_values, prop_values)[0, 1]
+                    
+                    # Handle NaN (occurs when variable or property has zero variance)
+                    # Set to 0.0 for display purposes - indicates no correlation possible
+                    if np.isnan(corr):
+                        corr = 0.0
+                    
+                    corr_matrix[i, j] = np.round(corr, decimals)
+        
+        return {
+            'parameter': parameter,
+            'matrix': corr_matrix,
+            'variables': variable_labels,
+            'properties': property_labels,
+            'n_cases': n_cases,
+            'constant_variables': constant_variables if constant_variables else None,
+            'skipped_variables': skipped_variables if skipped_variables else None
+        }
 
 
 # ================================================================
@@ -2510,6 +2664,140 @@ class TornadoProcessor:
             return results, all_selected_cases
         else:
             return results[0] if len(results) == 1 else results
+    
+    # ================================================================
+    # PUBLIC API - CORRELATION GRID
+    # ================================================================
+    
+    def correlation_grid(
+        self,
+        parameter: str = None,
+        filters: Union[Dict[str, Any], str] = None,
+        variables: List[str] = None,
+        multiplier: float = None,
+        decimals: int = 2
+    ) -> Dict[str, Any]:
+        """Generate Pearson correlation matrix for correlation plots.
+        
+        Computes correlations between variables (y-axis) and volumetric properties (x-axis).
+        Properties are ordered logically based on Case.parameters() calculation sequence.
+        
+        Pearson correlation coefficient ranges from -1 to +1:
+        - +1.0 = perfect positive correlation (variable ↑ → property ↑)
+        - -1.0 = perfect negative correlation (variable ↑ → property ↓)
+        -  0.0 = no linear correlation
+        
+        Args:
+            parameter: Tornado parameter name (defaults to first parameter).
+                      REQUIRED: Must specify which parameter to analyze.
+            filters: Optional filters to apply ONLY to property extraction (NOT to variables).
+                    Variables always come directly from the raw data.
+                    Can be a filter name string or dict.
+                    Note: 'property' key in filters is ignored - all volumetric properties are used.
+            variables: List of variable names to use (with or without $ prefix).
+                      Defaults to self.default_variables if set.
+                      REQUIRED if default_variables is not set.
+            multiplier: Optional display multiplier override for properties (e.g., 1e-6 for mcm)
+            decimals: Number of decimal places for correlation coefficients (default: 2)
+        
+        Returns:
+            Dictionary with:
+                - 'parameter': Parameter name (for plot title)
+                - 'matrix': 2D numpy array of correlation coefficients (rows=variables, cols=properties)
+                - 'variables': List of variable names (y-axis labels) - includes constant variables
+                - 'properties': List of property names with units (x-axis labels)
+                - 'n_cases': Number of cases used in correlation calculation
+                - 'constant_variables': List of (variable, value) tuples for zero-variance variables (None if none found)
+                - 'skipped_variables': List of (variable, reason) tuples for non-numeric variables (None if all included)
+        
+        Raises:
+            ValueError: If no variables are available (neither passed nor in default_variables)
+            ValueError: If no volumetric properties could be extracted
+            ValueError: If no numeric variables could be found (all variables are strings)
+        
+        Note:
+            - Only numeric variables are included. String variables are automatically skipped.
+            - Constant variables (zero variance) are INCLUDED but their correlations are set to 0.0.
+              This is important for QC - knowing a variable doesn't vary is valuable information.
+            - Warnings about division by zero are suppressed for constant variables.
+        
+        Example:
+            >>> # Minimal usage (requires default_variables to be set)
+            >>> processor.default_variables = ['Porosity', 'NTG', 'Sw']
+            >>> corr = processor.correlation_grid('Full_Uncertainty')
+            >>> 
+            >>> # Check for constant variables (important for QC!)
+            >>> if corr['constant_variables']:
+            ...     print("⚠️  Constant variables (no variance):")
+            ...     for var, value in corr['constant_variables']:
+            ...         print(f"   - {var} = {value} (correlation set to 0.0)")
+            >>> # Output: Structure_variation = 1.0 (correlation set to 0.0)
+            >>> 
+            >>> # Check if any variables were skipped
+            >>> if corr['skipped_variables']:
+            ...     print(f"Skipped: {corr['skipped_variables']}")
+            >>> # Output: Skipped: [('WellName', 'non-numeric (string) data')]
+            >>> 
+            >>> # With explicit variables (mixing numeric, string, and constant)
+            >>> corr = processor.correlation_grid(
+            ...     parameter='Full_Uncertainty',
+            ...     variables=['Porosity', 'NTG', 'WellName', 'Structure_variation']
+            ... )
+            >>> print(f"Included: {corr['variables']}")  
+            >>> # ['Porosity', 'NTG', 'Structure_variation']
+            >>> # Note: Structure_variation included even though constant!
+            >>> 
+            >>> # With filters (applied only to properties)
+            >>> corr = processor.correlation_grid(
+            ...     parameter='Full_Uncertainty',
+            ...     filters={'zone': 'zone1', 'fluid': 'oil'}
+            ... )
+            >>> 
+            >>> # Print as table
+            >>> import pandas as pd
+            >>> df = pd.DataFrame(corr['matrix'], 
+            ...                   index=corr['variables'], 
+            ...                   columns=corr['properties'])
+            >>> print(df)
+            >>> 
+            >>> # Create heatmap (constant variables will show as 0.0)
+            >>> import seaborn as sns
+            >>> sns.heatmap(corr['matrix'], 
+            ...            xticklabels=corr['properties'],
+            ...            yticklabels=corr['variables'],
+            ...            annot=True, fmt='.2f', cmap='coolwarm', 
+            ...            center=0, vmin=-1, vmax=1, square=True)
+            >>> plt.title(f"Correlation Matrix - {corr['parameter']}")
+        """
+        # Resolve parameter
+        resolved = self._resolve_parameter(parameter)
+        
+        # Resolve variables
+        if variables is None:
+            if self.default_variables is None:
+                raise ValueError(
+                    "No variables specified. Either pass 'variables' parameter or "
+                    "set default_variables on the processor."
+                )
+            variables = self.default_variables
+        
+        # Normalize variable names (strip $ prefix)
+        variables_normalized = [v.lstrip('$') for v in variables]
+        
+        # Resolve filters
+        if filters is not None:
+            filters = self.filter_manager.resolve_filter_preset(filters)
+        else:
+            filters = {}
+        
+        # Delegate to StatisticsComputer
+        return self.statistics_computer.compute_correlation_grid(
+            parameter=resolved,
+            variables=variables_normalized,
+            filters=filters,
+            multiplier=multiplier,
+            decimals=decimals
+        )
     
     # ================================================================
     # PUBLIC API - CONVENIENCE METHODS
