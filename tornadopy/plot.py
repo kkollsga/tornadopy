@@ -106,6 +106,8 @@ def tornado_plot(
     if subtitle is None:
         unit_str = f" {unit}" if unit else ""
         subtitle = f"Base case = {base:.2f}{unit_str}"
+        if reference_case is not None:
+            subtitle += f" | Ref case = {reference_case:.2f}{unit_str}"
 
     # --- Prepare data ---
     data = []
@@ -180,9 +182,16 @@ def tornado_plot(
     # For header/value separation within each bar (use customizable setting)
     header_value_offset = s["header_value_spacing"]
 
-    # For reference case label (should be just outside plot area)
-    # Calculate based on bar spacing to place it consistently above first bar
-    ref_case_offset = bar_spacing * 0.7  # 70% of bar spacing above plot
+    # Set explicit y-axis limits for robust positioning
+    # Bars are at 0, 1, 2, ..., n_bars-1
+    # Add padding above and below for labels
+    y_padding = 0.5
+    ymin = -y_padding  # Above the first bar (axis will be inverted)
+    ymax = n_bars - 1 + y_padding  # Below the last bar
+
+    # For reference case label (should be just outside plot area, above first bar)
+    # Place it slightly above ymin (more negative since axis is inverted)
+    ref_case_offset = y_padding + 0.3  # Just outside the plot boundary
 
     # --- Titles ---
     plot_box = ax.get_position()
@@ -387,10 +396,10 @@ def tornado_plot(
     # --- Axis styling ---
     # Base case line
     ax.axvline(base, color=s["baseline_color"], lw=s["baseline_width"], zorder=3)
-    
+
     ax.set_xlim(xmin, xmax)
+    ax.set_ylim(ymax, ymin)  # Reversed to create inverted axis (top to bottom)
     ax.set_yticks([])
-    ax.invert_yaxis()
     ax.set_xlabel(unit or "Effect", fontsize=10, color=s["label_color"])
     for spine in ax.spines.values():
         spine.set_color(s["outline_color"])
