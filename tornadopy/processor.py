@@ -2178,10 +2178,10 @@ class TornadoProcessor:
     """Main orchestrator for tornado analysis."""
     
     def __init__(
-        self, 
-        filepath: str, 
+        self,
+        filepath: str,
         display_formats: Dict[str, float] = None,
-        base_case: str = None
+        base_case: str = "Base_case"
     ):
         """Initialize processor with Excel file path and display formatting."""
         self.filepath = Path(filepath)

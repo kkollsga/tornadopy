@@ -87,7 +87,10 @@ Data rows:
 3. **Data Block**: Starts after "Case" row, each row is a different uncertainty case
 4. **Properties**: Clearly labeled in headers (e.g., stoiip, giip, npv)
 5. **Multiple Sheets**: Each parameter in a separate sheet
-6. **Base Case Sheet** (Optional): Row 0 = base case, Row 1 = reference case
+6. **Base Case Sheet** (Optional, default: "Base_case"):
+   - First case (row 0) = base case
+   - Second case (row 1) = reference case
+   - Remaining cases are ignored
 
 ### Excel Preparation Workflow
 
@@ -99,14 +102,14 @@ Data rows:
 ### Initialization
 
 ```python
-# Basic initialization
+# Basic initialization (uses default base_case="Base_case")
 processor = TornadoProcessor("data.xlsx")
 
-# With multiplier and base case
+# With custom display formats and base case sheet
 processor = TornadoProcessor(
     "data.xlsx",
-    multiplier=1e-6,           # Convert to millions
-    base_case="BaseCases"      # Sheet with base/reference values
+    display_formats={'stoiip': 1e-6, 'giip': 1e-9},  # Custom display multipliers
+    base_case="BaseCases"                             # Sheet with base/reference values (default: "Base_case")
 )
 ```
 
@@ -585,8 +588,8 @@ from tornadopy import TornadoProcessor, tornado_plot, distribution_plot, correla
 # 1. Initialize
 processor = TornadoProcessor(
     "uncertainty_analysis.xlsx",
-    multiplier=1e-6,
-    base_case="BaseCases"
+    display_formats={'stoiip': 1e-6, 'giip': 1e-9},
+    base_case="BaseCases"  # Optional - defaults to "Base_case"
 )
 
 # 2. Set up filters
@@ -660,7 +663,7 @@ print(f"P90 Case: {result['closest_cases'][1]['reference']}")
 
 **Initialization:**
 ```python
-TornadoProcessor(filepath, multiplier=1.0, base_case=None)
+TornadoProcessor(filepath, display_formats=None, base_case="Base_case")
 ```
 
 **Data Exploration:**
