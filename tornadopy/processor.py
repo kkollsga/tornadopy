@@ -2566,27 +2566,45 @@ class TornadoProcessor:
             
             if include_base_case:
                 try:
-                    base_val = self.base_case(
-                        property=prop_to_use, filters=filters, multiplier=multiplier
-                    )
-                    if isinstance(base_val, dict):
-                        case_entry["base_case"] = next(iter(base_val.values()))
-                    else:
+                    base_case_obj = self.base_case()
+                    if prop_to_use:
+                        # Use __getitem__ to raise KeyError if property not found
+                        base_val = base_case_obj[prop_to_use]
+                        # Apply multiplier if provided
+                        if multiplier is not None:
+                            base_val = base_val * multiplier
                         case_entry["base_case"] = base_val
+                    else:
+                        # No property specified - get first numeric property
+                        props = base_case_obj.properties()
+                        if props:
+                            base_val = next(iter(props.values()))
+                            if multiplier is not None:
+                                base_val = base_val * multiplier
+                            case_entry["base_case"] = base_val
                 except Exception as e:
                     if "errors" not in skip:
                         case_entry["errors"] = case_entry.get("errors", [])
                         case_entry["errors"].append(f"Failed to extract base_case: {e}")
-            
+
             if include_reference_case:
                 try:
-                    ref_val = self.ref_case(
-                        property=prop_to_use, filters=filters, multiplier=multiplier
-                    )
-                    if isinstance(ref_val, dict):
-                        case_entry["reference_case"] = next(iter(ref_val.values()))
-                    else:
+                    ref_case_obj = self.ref_case()
+                    if prop_to_use:
+                        # Use __getitem__ to raise KeyError if property not found
+                        ref_val = ref_case_obj[prop_to_use]
+                        # Apply multiplier if provided
+                        if multiplier is not None:
+                            ref_val = ref_val * multiplier
                         case_entry["reference_case"] = ref_val
+                    else:
+                        # No property specified - get first numeric property
+                        props = ref_case_obj.properties()
+                        if props:
+                            ref_val = next(iter(props.values()))
+                            if multiplier is not None:
+                                ref_val = ref_val * multiplier
+                            case_entry["reference_case"] = ref_val
                 except Exception as e:
                     error_msg = str(e)
                     if "errors" not in skip and "Available: []" not in error_msg:
@@ -2852,7 +2870,7 @@ class TornadoProcessor:
         Returns:
             For single property: Dict with keys:
                 - 'data': np.ndarray of distribution values
-                - 'title': str title for the distribution (format: "{parameter} distribution plot", underscores replaced with spaces)
+                - 'title': str title for the distribution (format: "{parameter} distribution", underscores replaced with spaces)
                 - 'property': str property name
                 - 'unit': str unit string (e.g., 'mcm', 'bcm')
                 - 'parameter': str tornado parameter name (original with underscores)
@@ -2927,13 +2945,13 @@ class TornadoProcessor:
         # Get unit string
         unit = self.unit_manager.get_display_unit(property_name)
 
-        # Create title - format: "{parameter} distribution plot"
+        # Create title - format: "{parameter} distribution"
         # Replace underscores with spaces in parameter name
         if parameter:
             parameter_display = parameter.replace('_', ' ')
-            title = f"{parameter_display} distribution plot"
+            title = f"{parameter_display} distribution"
         else:
-            title = "Distribution plot"
+            title = "Distribution"
 
         return {
             'data': data,

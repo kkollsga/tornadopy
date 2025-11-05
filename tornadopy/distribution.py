@@ -34,7 +34,7 @@ def distribution_plot(
         data: Either:
             - Dict with keys 'data', 'title', 'property', 'unit', 'parameter', 'filter_name' (from processor.distribution())
             - Array-like data (numpy array, list, or pandas Series) for legacy support
-        title: Chart title (optional if data is dict with 'title' key, format: "{parameter} distribution plot")
+        title: Chart title (optional if data is dict with 'title' key, format: "{parameter} distribution")
         unit: Unit label for x-axis and subtitle (optional if data is dict with 'unit' key)
         outfile: Output file path (if specified, saves the figure)
         target_bins: Target number of bins for histogram (default 20)
@@ -57,7 +57,7 @@ def distribution_plot(
         ... )
         >>> # dist is now a dict with:
         >>> # {'data': array([...]),
-        >>> #  'title': 'Parameter 1 distribution plot',
+        >>> #  'title': 'Parameter 1 distribution',
         >>> #  'property': 'stoiip',
         >>> #  'unit': 'bcm',
         >>> #  'parameter': 'Parameter_1',
@@ -67,8 +67,8 @@ def distribution_plot(
         ...     outfile="distribution.png"
         ... )
         >>> # Plot will show:
-        >>> # Title: "Parameter 1 distribution plot"  (underscores replaced with spaces)
-        >>> # Subtitle: "Cerisa | P90: 123.45 bcm - P50: 234.56 bcm - P10: 345.67 bcm"
+        >>> # Title: "Parameter 1 distribution"  (underscores replaced with spaces)
+        >>> # Subtitle: "Cerisa | P90: 123.45 - P50: 234.56 - P10: 345.67 bcm"  (Cerisa is bold, unit only after P10)
         >>> # X-axis: "STOIIP (bcm)"
     """
     # Handle new dict format from processor.distribution()
@@ -169,20 +169,15 @@ def distribution_plot(
     p10 = np.percentile(distribution_data, 90)  # P10 = 90th percentile (high value)
 
     # --- Subtitle with units ---
-    # Format: "Filter name | P90: xx mcm - P50: xx mcm - P10: xx mcm"
+    # Format: "Filter name | P90: xx - P50: xx - P10: xx mcm"
+    # Only show unit after P10 value
     if unit:
         unit_str = f" {unit}"
     else:
         unit_str = ""
 
-    subtitle_parts = []
-    if filter_name:
-        subtitle_parts.append(filter_name)
-
-    percentiles_str = f"P90: {p90:.2f}{unit_str} - P50: {p50:.2f}{unit_str} - P10: {p10:.2f}{unit_str}"
-    subtitle_parts.append(percentiles_str)
-
-    subtitle = " | ".join(subtitle_parts)
+    # Build percentiles string - unit only after P10
+    percentiles_str = f"P90: {p90:.2f} - P50: {p50:.2f} - P10: {p10:.2f}{unit_str}"
 
     # --- Calculate beautiful bins ---
     def get_beautiful_bins(data, target_bins):
@@ -232,8 +227,28 @@ def distribution_plot(
     plot_center = (plot_box.x0 + plot_box.x1) / 2
     fig.text(plot_center, 0.97, title, ha="center", fontsize=s["title_fontsize"],
              fontweight="bold", color=s["text_color"])
-    fig.text(plot_center, 0.93, subtitle, ha="center", fontsize=s["subtitle_fontsize"],
-             color=s["text_color"], alpha=0.85)
+
+    # Render subtitle - filter name in bold if present
+    if filter_name:
+        # Render as two text objects: bold filter name and regular percentiles
+        # Estimate relative widths for positioning to center both together
+        filter_len = len(filter_name)
+        rest_len = len(f" | {percentiles_str}")
+        total_len = filter_len + rest_len
+
+        # Calculate position offset from center
+        # Offset so that the combined text appears centered
+        filter_offset = -(rest_len / total_len) * 0.12  # Adjust 0.12 based on typical text width
+        rest_offset = (filter_len / total_len) * 0.12
+
+        fig.text(plot_center + filter_offset, 0.93, filter_name, ha="right",
+                fontsize=s["subtitle_fontsize"], color=s["text_color"], alpha=0.85, fontweight="bold")
+        fig.text(plot_center + rest_offset, 0.93, f" | {percentiles_str}", ha="left",
+                fontsize=s["subtitle_fontsize"], color=s["text_color"], alpha=0.85)
+    else:
+        # No filter name, just render percentiles centered
+        fig.text(plot_center, 0.93, percentiles_str, ha="center", fontsize=s["subtitle_fontsize"],
+                 color=s["text_color"], alpha=0.85)
 
     # --- Histogram (no gaps) ---
     counts, bin_edges, patches = ax.hist(
