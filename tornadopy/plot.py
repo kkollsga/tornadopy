@@ -33,17 +33,20 @@ def tornado_plot(
     - filter_name: optional filter name to display in subtitle
     - subtitle format: "<filter name>  |  Base case: xx   Ref case: xx unit" (centered)
     """
-    # Auto-detect base and reference_case from sections
+    # Auto-detect base, reference_case, and filter_name from sections
     auto_base = None
     auto_reference = None
+    auto_filter_name = None
 
     for sec in sections:
         if "base_case" in sec:
             auto_base = sec.get("base_case")
         if "reference_case" in sec:
             auto_reference = sec.get("reference_case")
+        if "filter_name" in sec:
+            auto_filter_name = sec.get("filter_name")
         # Stop after finding the first entry with these values
-        if auto_base is not None or auto_reference is not None:
+        if auto_base is not None or auto_reference is not None or auto_filter_name is not None:
             break
 
     # Use auto-detected values if not explicitly provided
@@ -55,6 +58,9 @@ def tornado_plot(
 
     if reference_case is None and auto_reference is not None:
         reference_case = auto_reference
+
+    if filter_name is None and auto_filter_name is not None:
+        filter_name = auto_filter_name
     # --- Default settings ---
     s = {
         "figsize": (10, 7),
@@ -227,8 +233,29 @@ def tornado_plot(
     plot_center = (plot_box.x0 + plot_box.x1) / 2
     fig.text(plot_center, 0.97, title, ha="center", fontsize=s["title_fontsize"],
              fontweight="bold", color=s["label_color"])
-    fig.text(plot_center, 0.93, subtitle, ha="center", fontsize=s["subtitle_fontsize"],
-             color=s["label_color"], alpha=0.85)
+
+    # Render subtitle - make filter name bold if present
+    if filter_name and subtitle.startswith(filter_name):
+        # Split subtitle into bold filter name and regular rest
+        rest_of_subtitle = subtitle[len(filter_name):]
+
+        # Estimate relative widths for positioning to center both together
+        filter_len = len(filter_name)
+        rest_len = len(rest_of_subtitle)
+        total_len = filter_len + rest_len
+
+        # Calculate position offset from center to keep combined text centered
+        filter_offset = -(rest_len / total_len) * 0.15
+        rest_offset = (filter_len / total_len) * 0.15
+
+        fig.text(plot_center + filter_offset, 0.93, filter_name, ha="right",
+                fontsize=s["subtitle_fontsize"], color=s["label_color"], alpha=0.85, fontweight="bold")
+        fig.text(plot_center + rest_offset, 0.93, rest_of_subtitle, ha="left",
+                fontsize=s["subtitle_fontsize"], color=s["label_color"], alpha=0.85)
+    else:
+        # No filter name or custom subtitle - render as single centered text
+        fig.text(plot_center, 0.93, subtitle, ha="center", fontsize=s["subtitle_fontsize"],
+                 color=s["label_color"], alpha=0.85)
 
     # --- Gridlines ---
     ax.xaxis.set_major_formatter(FormatStrFormatter('%.2f'))

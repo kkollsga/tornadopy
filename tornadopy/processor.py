@@ -2556,6 +2556,10 @@ class TornadoProcessor:
         if self.base_case_parameter and (include_base_case or include_reference_case):
             case_entry = {"parameter": self.base_case_parameter}
 
+            # Add filter_name if present in options
+            if options and 'filter_name' in options:
+                case_entry['filter_name'] = options['filter_name']
+
             # Extract property from filters
             prop_to_use = None
             non_property_filters = None
@@ -2849,14 +2853,31 @@ class TornadoProcessor:
     ) -> Union[Dict, List[Dict], Tuple[List[Dict], List[Case]]]:
         """Compute tornado chart statistics."""
         merged_options = options.copy() if options else {}
-        
+
         if skip is not None:
             skip_list = [skip] if isinstance(skip, str) else skip
             existing_skip = merged_options.get('skip', [])
             if isinstance(existing_skip, str):
                 existing_skip = [existing_skip]
             merged_options['skip'] = list(set(existing_skip + skip_list))
-        
+
+        # Extract filter name for tornado plot metadata
+        filter_name = None
+        original_filter_str = filters if isinstance(filters, str) else None
+        if original_filter_str:
+            if '_' in original_filter_str:
+                parts = original_filter_str.rsplit('_', 1)
+                if len(parts) == 2:
+                    base_filter_name, _ = parts
+                    if base_filter_name in self.filter_manager.stored_filters:
+                        filter_name = base_filter_name
+            elif original_filter_str in self.filter_manager.stored_filters:
+                filter_name = original_filter_str
+
+        # Store filter_name in options to pass through
+        if filter_name:
+            merged_options['filter_name'] = filter_name
+
         return self.compute_batch(
             stats=['minmax', 'p90p10'],
             parameters="all",
