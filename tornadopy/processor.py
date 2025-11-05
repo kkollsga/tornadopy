@@ -2555,18 +2555,27 @@ class TornadoProcessor:
         
         if self.base_case_parameter and (include_base_case or include_reference_case):
             case_entry = {"parameter": self.base_case_parameter}
-            
+
+            # Extract property from filters
             prop_to_use = None
-            if filters and "property" in filters:
-                prop_filter = filters["property"]
-                if isinstance(prop_filter, str):
-                    prop_to_use = prop_filter
-                elif isinstance(prop_filter, list) and len(prop_filter) > 0:
-                    prop_to_use = prop_filter[0]
-            
+            non_property_filters = None
+            if filters:
+                non_property_filters = {k: v for k, v in filters.items() if k != "property"}
+                if "property" in filters:
+                    prop_filter = filters["property"]
+                    if isinstance(prop_filter, str):
+                        prop_to_use = prop_filter
+                    elif isinstance(prop_filter, list) and len(prop_filter) > 0:
+                        prop_to_use = prop_filter[0]
+
             if include_base_case:
                 try:
-                    base_case_obj = self.base_case()
+                    # Get base case with filters applied
+                    base_case_obj = self.case_manager.get_case(
+                        0,
+                        self.base_case_parameter,
+                        filters=non_property_filters
+                    )
                     if prop_to_use:
                         # Use __getitem__ to raise KeyError if property not found
                         base_val = base_case_obj[prop_to_use]
@@ -2589,7 +2598,12 @@ class TornadoProcessor:
 
             if include_reference_case:
                 try:
-                    ref_case_obj = self.ref_case()
+                    # Get reference case with filters applied
+                    ref_case_obj = self.case_manager.get_case(
+                        1,
+                        self.base_case_parameter,
+                        filters=non_property_filters
+                    )
                     if prop_to_use:
                         # Use __getitem__ to raise KeyError if property not found
                         ref_val = ref_case_obj[prop_to_use]

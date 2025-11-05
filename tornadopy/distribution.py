@@ -145,7 +145,7 @@ def distribution_plot(
         "bottom_margin": 0.12,
         "top_margin": 0.88,
         # Percentile markers
-        "show_percentile_markers": False,
+        "show_percentile_markers": True,
         "marker_size": 8,
         "marker_color": "#FB877A",  # light red
         "marker_edge_color": "#BA2A19",  # dark red
