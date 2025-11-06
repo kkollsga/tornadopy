@@ -506,7 +506,7 @@ class DataExtractor:
         mask = pl.lit(True)
 
         # Metadata-only keys that should not be used for filtering
-        metadata_only_keys = {'property', 'name'}
+        metadata_only_keys = {'name'}
 
         for field, value in filters_norm.items():
             if value is None:
