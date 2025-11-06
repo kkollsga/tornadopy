@@ -502,28 +502,38 @@ class DataExtractor:
             return result
         
         filters_norm = self.normalize_filters(filters)
-        
+
         mask = pl.lit(True)
-        
+
+        # Metadata-only keys that should not be used for filtering
+        metadata_only_keys = {'property', 'name'}
+
         for field, value in filters_norm.items():
             if value is None:
                 continue
-            
+
+            # Skip metadata-only keys
+            if field in metadata_only_keys:
+                continue
+
             if field not in metadata.columns:
                 raise ValueError(
                     f"Field '{field}' not available. "
                     f"Available: {dynamic_fields}"
                 )
-            
+
             if isinstance(value, list):
                 mask = mask & pl.col(field).is_in(value)
             else:
                 mask = mask & (pl.col(field) == value)
         
         matched = metadata.filter(mask)
-        
+
         if matched.is_empty():
-            filter_desc = ", ".join(f"{k}={v}" for k, v in filters_norm.items())
+            filter_desc = ", ".join(
+                f"{k}={v}" for k, v in filters_norm.items()
+                if k not in metadata_only_keys
+            )
             raise ValueError(f"No columns match filters: {filter_desc}")
         
         column_names = matched.select("column_name").to_series().to_list()
@@ -2429,18 +2439,18 @@ class TornadoProcessor:
     ) -> Union[Dict, Tuple[Dict, List[Case]]]:
         """Compute statistics for a single parameter with filters."""
         resolved = self._resolve_parameter(parameter)
-        
+
         filters = self.filter_manager.resolve_filter_preset(
             filters,
             self.properties(resolved)
         )
         filters = FilterManager.merge_property_filter(filters, property)
-        
+
         options = options or {}
         selection_criteria = selection_criteria or {}
         skip = options.get("skip", [])
         decimals = options.get("decimals", 6)
-        
+
         property_filter = filters.get("property")
         is_multi_property = isinstance(property_filter, list)
         
@@ -2546,7 +2556,7 @@ class TornadoProcessor:
         """Compute statistics for multiple parameters."""
         filters = self.filter_manager.resolve_filter_preset(filters)
         filters = FilterManager.merge_property_filter(filters, property)
-        
+
         if parameters == "all":
             param_list = list(self.data.keys())
             if self.base_case_parameter and self.base_case_parameter in param_list:
