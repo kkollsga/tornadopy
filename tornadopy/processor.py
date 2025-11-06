@@ -2860,6 +2860,10 @@ class TornadoProcessor:
         else:
             filters = {}
 
+        # Check for "name" key in resolved filters (overrides extracted name)
+        if isinstance(filters, dict) and 'name' in filters:
+            filter_name = filters['name']
+
         # Delegate to StatisticsComputer
         result = self.statistics_computer.compute_correlation_grid(
             parameter=resolved,
@@ -2917,10 +2921,16 @@ class TornadoProcessor:
             elif original_filter_str in self.filter_manager.stored_filters:
                 filter_name = original_filter_str
 
-        # Resolve filters to extract property if not already extracted
+        # Resolve filters to extract property and name
+        resolved_filters = self.filter_manager.resolve_filter_preset(filters)
+        resolved_filters = FilterManager.merge_property_filter(resolved_filters, property)
+
+        # Check for "name" key in resolved filters (overrides extracted name)
+        if isinstance(resolved_filters, dict) and 'name' in resolved_filters:
+            filter_name = resolved_filters['name']
+
+        # Extract property if not already extracted from string
         if property_name is None:
-            resolved_filters = self.filter_manager.resolve_filter_preset(filters)
-            resolved_filters = FilterManager.merge_property_filter(resolved_filters, property)
             if resolved_filters and 'property' in resolved_filters:
                 prop_filter = resolved_filters['property']
                 if isinstance(prop_filter, str):
@@ -2981,6 +2991,13 @@ class TornadoProcessor:
         # Resolve parameter
         resolved_parameter = self._resolve_parameter(parameter)
 
+        # Resolve filters early to extract metadata
+        resolved_filters = self.filter_manager.resolve_filter_preset(
+            filters,
+            self.properties(resolved_parameter)
+        )
+        resolved_filters = FilterManager.merge_property_filter(resolved_filters, property)
+
         compute_result = self.compute(
             stats="distribution",
             parameter=parameter,
@@ -3002,20 +3019,15 @@ class TornadoProcessor:
             result = {}
             for prop_name, prop_data in distribution_data.items():
                 result[prop_name] = self._create_distribution_metadata(
-                    prop_data, prop_name, original_filter_str, multiplier, resolved_parameter
+                    prop_data, prop_name, original_filter_str, resolved_filters, multiplier, resolved_parameter
                 )
             return result
 
         # Single property - extract property name
-        resolved_filters = self.filter_manager.resolve_filter_preset(
-            filters,
-            self.properties(resolved_parameter)
-        )
-        resolved_filters = FilterManager.merge_property_filter(resolved_filters, property)
         property_name = resolved_filters.get('property', 'Value')
 
         return self._create_distribution_metadata(
-            distribution_data, property_name, original_filter_str, multiplier, resolved_parameter
+            distribution_data, property_name, original_filter_str, resolved_filters, multiplier, resolved_parameter
         )
 
     def _create_distribution_metadata(
@@ -3023,6 +3035,7 @@ class TornadoProcessor:
         data: np.ndarray,
         property_name: str,
         filter_str: str = None,
+        resolved_filters: Dict[str, Any] = None,
         _multiplier: float = None,
         parameter: str = None
     ) -> Dict[str, Any]:
@@ -3039,6 +3052,10 @@ class TornadoProcessor:
                         filter_name = base_filter_name
             elif filter_str in self.filter_manager.stored_filters:
                 filter_name = filter_str
+
+        # Check for "name" key in resolved filters (overrides extracted name)
+        if isinstance(resolved_filters, dict) and 'name' in resolved_filters:
+            filter_name = resolved_filters['name']
 
         # Get unit string
         unit = self.unit_manager.get_display_unit(property_name)
