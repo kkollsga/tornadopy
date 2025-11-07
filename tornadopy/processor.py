@@ -532,25 +532,7 @@ class ExcelDataLoader:
         sheet_name: str,
         unit_manager: 'UnitManager' = None
     ) -> Tuple[List[str], Dict[str, np.ndarray], Dict[str, Dict[str, float]]]:
-        """Validate QC sums against segment totals.
-        
-        Creates undefined volumes as difference between QC and segments.
-        Flags properties where |undefined| > 5% of QC value.
-        
-        Args:
-            data_df: Data DataFrame
-            metadata: Metadata DataFrame
-            qc_values: Dictionary of normalized QC values
-            sheet_name: Sheet name for reporting
-            unit_manager: Optional UnitManager for display formatting
-        
-        Returns:
-            Tuple of (error_messages, undefined_volumes_dict, qc_report_dict)
-            where:
-            - error_messages: Critical errors (currently none, kept for compatibility)
-            - undefined_volumes_dict: Maps property -> array of undefined volumes per case
-            - qc_report_dict: Maps property -> {qc, segments, undefined, percent, flagged, unit}
-        """
+        """Validate QC sums against segment totals."""
         if metadata.is_empty() or not qc_values:
             return [], {}, {}
         
@@ -564,7 +546,6 @@ class ExcelDataLoader:
         ).any()
         
         if not has_segments:
-            # No segments to compare against
             return [], {}, {}
         
         # Get segment columns only
@@ -573,14 +554,37 @@ class ExcelDataLoader:
         n_cases = len(data_df)
         
         # Group by property
-        for property_name, qc_value in qc_values.items():
+        for property_name, qc_value_first_row in qc_values.items():
             # Get all segment columns for this property
             prop_segment_cols = segment_metadata.filter(
                 pl.col('property') == property_name
             )['column_name'].to_list()
             
             if not prop_segment_cols:
-                # No segments for this property, skip validation
+                continue
+            
+            # NEW: Find the QC column for this property
+            qc_metadata = metadata.filter(
+                (pl.col('column_type') == 'qc') & 
+                (pl.col('property') == property_name)
+            )
+            
+            if qc_metadata.is_empty():
+                # No QC column, skip validation
+                continue
+            
+            qc_col_name = qc_metadata['column_name'][0]
+            
+            # NEW: Extract QC values for ALL rows (not just first row)
+            try:
+                qc_column_values = (
+                    data_df.select(qc_col_name)
+                    .to_series()
+                    .cast(pl.Float64, strict=False)
+                    .to_numpy()
+                )
+            except Exception as e:
+                errors.append(f"Failed to extract QC column '{qc_col_name}': {e}")
                 continue
             
             # Sum all segment columns for ALL rows
@@ -592,45 +596,44 @@ class ExcelDataLoader:
                     .to_numpy()
                 )
                 
-                # Use first row for reporting
-                first_row_sum = segment_sums[0]
+                # NEW: Calculate undefined per row using QC value from that row
+                undefined_per_case = qc_column_values - segment_sums
                 
-                # Calculate undefined volumes (can be negative if segments > QC)
-                # undefined = QC - segments
-                undefined_per_case = qc_value - segment_sums
-                undefined_first_row = qc_value - first_row_sum
+                # Use first row for reporting
+                qc_first_row = qc_column_values[0]
+                first_row_sum = segment_sums[0]
+                undefined_first_row = undefined_per_case[0]
                 
                 # Check if significant (>5% of QC)
-                if abs(qc_value) > 1e-10:
-                    percent_undefined = (abs(undefined_first_row) / abs(qc_value)) * 100
+                if abs(qc_first_row) > 1e-10:
+                    percent_undefined = (abs(undefined_first_row) / abs(qc_first_row)) * 100
                 else:
                     percent_undefined = 0.0
                 
                 flagged = percent_undefined > 5.0
                 
-                # Get display unit (one order of magnitude larger than preference)
+                # Get display unit
                 if unit_manager:
                     display_mult = unit_manager.get_display_multiplier(property_name)
                     
-                    # Use one order magnitude larger
-                    if display_mult == 1e-9:  # bcm -> mcm
+                    if display_mult == 1e-9:
                         report_mult = 1e-6
                         report_unit = 'mcm'
-                    elif display_mult == 1e-6:  # mcm -> kcm
+                    elif display_mult == 1e-6:
                         report_mult = 1e-3
                         report_unit = 'kcm'
-                    elif display_mult == 1e-3:  # kcm -> m³
+                    elif display_mult == 1e-3:
                         report_mult = 1.0
                         report_unit = 'm³'
-                    else:  # Default
+                    else:
                         report_mult = 1.0
                         report_unit = 'm³'
                     
-                    qc_display = qc_value * report_mult
+                    qc_display = qc_first_row * report_mult
                     segments_display = first_row_sum * report_mult
                     undefined_display = undefined_first_row * report_mult
                 else:
-                    qc_display = qc_value
+                    qc_display = qc_first_row
                     segments_display = first_row_sum
                     undefined_display = undefined_first_row
                     report_unit = 'm³'
@@ -646,14 +649,12 @@ class ExcelDataLoader:
                 }
                 
                 # Store undefined volumes if non-zero
-                tolerance = max(abs(qc_value) * 1e-6, 1e-3)
+                tolerance = max(abs(qc_first_row) * 1e-6, 1e-3)
                 if abs(undefined_first_row) > tolerance:
                     undefined_volumes[property_name] = undefined_per_case
-                    
+                        
             except Exception as e:
-                errors.append(
-                    f"Failed to validate '{property_name}': {str(e)}"
-                )
+                errors.append(f"Failed to validate '{property_name}': {str(e)}")
         
         return errors, undefined_volumes, qc_report
     
@@ -824,7 +825,7 @@ class DataExtractor:
         
         Args:
             exclude_qc: If True, exclude QC columns (single header row). 
-                       Set to False to include QC columns.
+                    Set to False to include QC columns.
         """
         if cache_key in self._column_selection_cache:
             return self._column_selection_cache[cache_key]
@@ -867,11 +868,44 @@ class DataExtractor:
         matched = metadata.filter(mask)
 
         if matched.is_empty():
+            # Build informative error message
             filter_desc = ", ".join(
                 f"{k}={v}" for k, v in filters_norm.items()
                 if k not in metadata_only_keys
             )
-            raise ValueError(f"No columns match filters: {filter_desc}")
+            
+            error_parts = [f"No columns match filters: {filter_desc}"]
+            
+            # Show metadata stats for debugging
+            if not metadata.is_empty():
+                error_parts.append(f"\nMetadata has {len(metadata)} rows")
+                if 'column_type' in metadata.columns:
+                    type_counts = {}
+                    for row in metadata.iter_rows(named=True):
+                        ct = row.get('column_type', 'unknown')
+                        type_counts[ct] = type_counts.get(ct, 0) + 1
+                    error_parts.append("Column types:")
+                    for ct, count in type_counts.items():
+                        error_parts.append(f"  {ct}: {count}")
+                
+                if 'property' in filters_norm:
+                    prop = filters_norm['property']
+                    prop_match = metadata.filter(pl.col('property') == prop)
+                    if len(prop_match) > 0:
+                        error_parts.append(f"\nProperty '{prop}' exists in {len(prop_match)} columns")
+                        if 'column_type' in prop_match.columns:
+                            qc_count = sum(1 for row in prop_match.iter_rows(named=True) 
+                                        if row.get('column_type') == 'qc')
+                            seg_count = sum(1 for row in prop_match.iter_rows(named=True) 
+                                        if row.get('column_type') == 'segment')
+                            error_parts.append(f"  QC columns: {qc_count}")
+                            error_parts.append(f"  Segment columns: {seg_count}")
+                            if exclude_qc and seg_count == 0:
+                                error_parts.append("\n⚠️  All columns are QC type (excluded by default)")
+                                error_parts.append("   This parameter may not have segmented data")
+                                error_parts.append("   Only QC (single header) columns exist for this property")
+            
+            raise ValueError("\n".join(error_parts))
         
         column_names = matched.select("column_name").to_series().to_list()
         result = (column_names, column_names)
@@ -895,6 +929,8 @@ class DataExtractor:
         if cache_key in self._extraction_cache:
             cached_values, cached_sources = self._extraction_cache[cache_key]
             return cached_values.copy(), cached_sources.copy()
+        
+        # REMOVED: Warning about summing all segments - it's a valid use case
         
         list_fields = {k: v for k, v in filters.items() if isinstance(v, list)}
         
@@ -1439,11 +1475,17 @@ class CaseManager:
         except:
             properties = []
         
+        # Filter to only volumetric properties
+        volumetric_properties = [
+            prop for prop in properties 
+            if self.unit_manager.is_volumetric_property(prop)
+        ]
+        
         base_filters = dict(filters) if filters else {}
         base_filters.pop("property", None)
         
         case_values = {}
-        for prop in properties:
+        for prop in volumetric_properties:
             try:
                 prop_filters = {**base_filters, "property": prop}
                 values, _ = self.processor._extract_property_values(
