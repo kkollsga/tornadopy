@@ -3362,62 +3362,38 @@ class TornadoProcessor:
                     elif isinstance(prop_filter, list) and len(prop_filter) > 0:
                         prop_to_use = prop_filter[0]
 
-            if include_base_case:
+            # Only extract if we have a property to extract
+            if prop_to_use:
+                # Build filters for extraction (same as other parameters)
+                extraction_filters = non_property_filters.copy() if non_property_filters else {}
+                extraction_filters['property'] = prop_to_use
+                
                 try:
-                    # Get base case with filters applied
-                    base_case_obj = self.case_manager.get_case(
-                        0,
+                    # Extract using standard method (excludes QC, sums segments)
+                    values, _ = self._extract_property_values(
                         self.base_case_parameter,
-                        filters=non_property_filters
+                        extraction_filters,
+                        validate_finite=False
                     )
-                    if prop_to_use:
-                        # Use __getitem__ to raise KeyError if property not found
-                        base_val = base_case_obj[prop_to_use]
-                        # Apply multiplier if provided
-                        if multiplier is not None:
-                            base_val = base_val * multiplier
+                    
+                    if include_base_case and len(values) > 0:
+                        base_val_raw = values[0]
+                        base_val = self.unit_manager.format_for_display(
+                            prop_to_use, base_val_raw, decimals=6, override_multiplier=multiplier
+                        )
                         case_entry["base_case"] = base_val
-                    else:
-                        # No property specified - get first numeric property
-                        props = base_case_obj.properties()
-                        if props:
-                            base_val = next(iter(props.values()))
-                            if multiplier is not None:
-                                base_val = base_val * multiplier
-                            case_entry["base_case"] = base_val
+                    
+                    if include_reference_case and len(values) > 1:
+                        ref_val_raw = values[1]
+                        ref_val = self.unit_manager.format_for_display(
+                            prop_to_use, ref_val_raw, decimals=6, override_multiplier=multiplier
+                        )
+                        case_entry["reference_case"] = ref_val
+                        
                 except Exception as e:
                     if "errors" not in skip:
                         case_entry["errors"] = case_entry.get("errors", [])
-                        case_entry["errors"].append(f"Failed to extract base_case: {e}")
-
-            if include_reference_case:
-                try:
-                    # Get reference case with filters applied
-                    ref_case_obj = self.case_manager.get_case(
-                        1,
-                        self.base_case_parameter,
-                        filters=non_property_filters
-                    )
-                    if prop_to_use:
-                        # Use __getitem__ to raise KeyError if property not found
-                        ref_val = ref_case_obj[prop_to_use]
-                        # Apply multiplier if provided
-                        if multiplier is not None:
-                            ref_val = ref_val * multiplier
-                        case_entry["reference_case"] = ref_val
-                    else:
-                        # No property specified - get first numeric property
-                        props = ref_case_obj.properties()
-                        if props:
-                            ref_val = next(iter(props.values()))
-                            if multiplier is not None:
-                                ref_val = ref_val * multiplier
-                            case_entry["reference_case"] = ref_val
-                except Exception as e:
-                    error_msg = str(e)
-                    if "errors" not in skip and "Available: []" not in error_msg:
-                        case_entry["errors"] = case_entry.get("errors", [])
-                        case_entry["errors"].append(f"Failed to extract reference_case: {e}")
+                        case_entry["errors"].append(f"Failed to extract base/reference cases: {e}")
             
             results.append(case_entry)
         
