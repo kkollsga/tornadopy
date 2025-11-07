@@ -532,7 +532,21 @@ class ExcelDataLoader:
         sheet_name: str,
         unit_manager: 'UnitManager' = None
     ) -> Tuple[List[str], Dict[str, np.ndarray], Dict[str, Dict[str, float]]]:
-        """Validate QC sums against segment totals."""
+        """Validate QC sums against segment totals.
+        
+        Creates undefined volumes as difference between QC and segments.
+        Flags properties where |undefined| > 5% of QC value.
+        
+        Args:
+            data_df: Data DataFrame
+            metadata: Metadata DataFrame
+            qc_values: Dictionary of normalized QC values (from FIRST ROW only)
+            sheet_name: Sheet name for reporting
+            unit_manager: Optional UnitManager for display formatting
+        
+        Returns:
+            Tuple of (error_messages, undefined_volumes_dict, qc_report_dict)
+        """
         if metadata.is_empty() or not qc_values:
             return [], {}, {}
         
@@ -612,20 +626,21 @@ class ExcelDataLoader:
                 
                 flagged = percent_undefined > 5.0
                 
-                # Get display unit
+                # Get display unit (one order of magnitude larger than preference)
                 if unit_manager:
                     display_mult = unit_manager.get_display_multiplier(property_name)
                     
-                    if display_mult == 1e-9:
+                    # Use one order magnitude larger
+                    if display_mult == 1e-9:  # bcm -> mcm
                         report_mult = 1e-6
                         report_unit = 'mcm'
-                    elif display_mult == 1e-6:
+                    elif display_mult == 1e-6:  # mcm -> kcm
                         report_mult = 1e-3
                         report_unit = 'kcm'
-                    elif display_mult == 1e-3:
+                    elif display_mult == 1e-3:  # kcm -> m³
                         report_mult = 1.0
                         report_unit = 'm³'
-                    else:
+                    else:  # Default
                         report_mult = 1.0
                         report_unit = 'm³'
                     
@@ -654,7 +669,9 @@ class ExcelDataLoader:
                     undefined_volumes[property_name] = undefined_per_case
                         
             except Exception as e:
-                errors.append(f"Failed to validate '{property_name}': {str(e)}")
+                errors.append(
+                    f"Failed to validate '{property_name}': {str(e)}"
+                )
         
         return errors, undefined_volumes, qc_report
     
@@ -2856,7 +2873,13 @@ class TornadoProcessor:
                     if qc_report:
                         n_flagged = len([p for p, info in qc_report.items() if info['flagged']])
                         if n_flagged > 0:
-                            self._loading_log.append(f"⚠ {sheet_name}: {n_flagged} flagged properties (>5% undefined)")
+                            # NEW: Print warning immediately with proper grammar
+                            flagged_props = [p for p, info in qc_report.items() if info['flagged']]
+                            property_word = "property" if n_flagged == 1 else "properties"
+                            print(f"\n[!] Warning: Sheet '{sheet_name}' has {n_flagged} flagged {property_word} with >5% undefined volumes")
+                            print(f"    Flagged: {', '.join(flagged_props)}")
+                            print(f"    Run processor.loading_log() for detailed breakdown")
+                            self._loading_log.append(f"⚠ {sheet_name}: {n_flagged} flagged {property_word} (>5% undefined)")
                         else:
                             self._loading_log.append(f"✓ {sheet_name}: QC passed")
                     elif qc_values_normalized:
