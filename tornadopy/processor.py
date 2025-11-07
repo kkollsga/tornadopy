@@ -285,8 +285,12 @@ class ExcelDataLoader:
         self, 
         df: pl.DataFrame, 
         sheet_name: str = "unknown"
-    ) -> Tuple[pl.DataFrame, pl.DataFrame, List[str], Dict]:
-        """Parse individual sheet into data, metadata, dynamic fields, and info."""
+    ) -> Tuple[pl.DataFrame, pl.DataFrame, List[str], Dict, Dict[str, float], Dict[str, Any]]:
+        """Parse individual sheet into data, metadata, dynamic fields, info, QC values, and structure info.
+        
+        Returns:
+            Tuple of (data_df, metadata_df, dynamic_fields, info_dict, qc_values, structure_info)
+        """
         # Find "Case" row
         case_mask = df.select(
             pl.col(df.columns[0]).cast(pl.Utf8).str.strip_chars() == "Case"
@@ -329,9 +333,12 @@ class ExcelDataLoader:
         if not dynamic_labels:
             dynamic_labels = ["property"]
         
-        # Build combined column headers
+        # Build combined column headers and detect column types
         header_rows = header_block.to_numpy().tolist()
         combined_headers = []
+        column_types = []  # 'qc' or 'segment'
+        n_header_rows_list = []
+        qc_values = {}
         
         for col_idx in range(len(header_rows[0])):
             labels = []
@@ -339,6 +346,30 @@ class ExcelDataLoader:
                 val = row[col_idx]
                 if val is not None and str(val).strip():
                     labels.append(str(val).strip())
+            
+            # Determine column type based on header depth
+            n_headers = len(labels)
+            n_header_rows_list.append(n_headers)
+            
+            if n_headers == 1:
+                column_type = 'qc'
+                # Extract QC value from first data row
+                property_name_raw = labels[0]
+                property_name, unit = self.unit_manager.parse_property_unit(property_name_raw)
+                property_clean = property_name.strip().lower()
+                
+                # Get first data value (before normalization)
+                if len(data_block) > 0:
+                    try:
+                        first_val = data_block[data_block.columns[col_idx]][0]
+                        if first_val is not None:
+                            qc_values[property_clean] = float(first_val)
+                    except (ValueError, TypeError):
+                        pass
+            else:
+                column_type = 'segment'
+            
+            column_types.append(column_type)
             combined_headers.append("_".join(labels) if labels else "")
         
         if len(set(combined_headers)) < len(combined_headers):
@@ -353,11 +384,22 @@ class ExcelDataLoader:
         if "Case" in data_block.columns:
             data_block = data_block.rename({"Case": "property"})
         
-        # Build column metadata table
+        # Build column metadata table with column_type
         metadata_rows = []
+        col_type_idx = 0
         for idx, col_name in enumerate(data_block.columns):
             if col_name.startswith("$") or col_name.lower().startswith("property"):
                 continue
+            
+            # Get the column type for this data column
+            # Need to map back to original column index
+            original_col_idx = idx
+            if original_col_idx < len(column_types):
+                col_type = column_types[original_col_idx]
+                n_headers = n_header_rows_list[original_col_idx]
+            else:
+                col_type = 'segment'  # Default
+                n_headers = len(dynamic_labels) + 1
             
             parts = col_name.split("_")
             property_name_raw = parts[-1] if parts else col_name
@@ -367,7 +409,9 @@ class ExcelDataLoader:
             meta = {
                 "column_name": col_name,
                 "column_index": idx,
-                "property": property_name.strip().lower()
+                "property": property_name.strip().lower(),
+                "column_type": col_type,  # NEW
+                "n_header_rows": n_headers  # NEW
             }
             
             for field_idx, field_name in enumerate(dynamic_labels):
@@ -380,7 +424,16 @@ class ExcelDataLoader:
         
         metadata_df = pl.DataFrame(metadata_rows) if metadata_rows else pl.DataFrame()
         
-        return data_block, metadata_df, dynamic_labels, info_dict
+        # Create structure info for comparison
+        has_segments = any(ct == 'segment' for ct in column_types)
+        structure_info = {
+            'dynamic_fields': dynamic_labels,
+            'has_segments': has_segments,
+            'n_qc_columns': sum(1 for ct in column_types if ct == 'qc'),
+            'n_segment_columns': sum(1 for ct in column_types if ct == 'segment')
+        }
+        
+        return data_block, metadata_df, dynamic_labels, info_dict, qc_values, structure_info
     
     def extract_sheet_property_units(self, metadata: pl.DataFrame) -> Dict[str, str]:
         """Extract property->unit mapping from a sheet's metadata."""
@@ -432,6 +485,280 @@ class ExcelDataLoader:
                         print(f"[!] Warning: Could not normalize column '{col_name}' in sheet '{sheet_name}': {e}")
         
         return df
+    
+    def normalize_qc_values(
+        self,
+        qc_values: Dict[str, float],
+        sheet_name: str
+    ) -> Dict[str, float]:
+        """Normalize QC values to base units (m³).
+        
+        Args:
+            qc_values: Dictionary of property -> QC value (in original units)
+            sheet_name: Sheet name for error reporting
+            
+        Returns:
+            Dictionary of property -> normalized QC value (in base m³)
+        """
+        normalized = {}
+        
+        for property_name, qc_value in qc_values.items():
+            if not self.unit_manager.is_volumetric_property(property_name):
+                normalized[property_name] = qc_value
+                continue
+            
+            if property_name in self.unit_manager.property_units:
+                unit = self.unit_manager.property_units[property_name]
+                factor = self.unit_manager.get_normalization_factor(unit)
+                
+                if factor != 1.0:
+                    try:
+                        normalized[property_name] = float(qc_value) * factor
+                    except Exception as e:
+                        print(f"[!] Warning: Could not normalize QC value for '{property_name}' in sheet '{sheet_name}': {e}")
+                        normalized[property_name] = qc_value
+                else:
+                    normalized[property_name] = qc_value
+            else:
+                normalized[property_name] = qc_value
+        
+        return normalized
+    
+    def validate_qc_data(
+        self,
+        data_df: pl.DataFrame,
+        metadata: pl.DataFrame,
+        qc_values: Dict[str, float],
+        sheet_name: str,
+        unit_manager: 'UnitManager' = None
+    ) -> Tuple[List[str], Dict[str, np.ndarray], Dict[str, Dict[str, float]]]:
+        """Validate QC sums against segment totals.
+        
+        Creates undefined volumes as difference between QC and segments.
+        Flags properties where |undefined| > 5% of QC value.
+        
+        Args:
+            data_df: Data DataFrame
+            metadata: Metadata DataFrame
+            qc_values: Dictionary of normalized QC values
+            sheet_name: Sheet name for reporting
+            unit_manager: Optional UnitManager for display formatting
+        
+        Returns:
+            Tuple of (error_messages, undefined_volumes_dict, qc_report_dict)
+            where:
+            - error_messages: Critical errors (currently none, kept for compatibility)
+            - undefined_volumes_dict: Maps property -> array of undefined volumes per case
+            - qc_report_dict: Maps property -> {qc, segments, undefined, percent, flagged, unit}
+        """
+        if metadata.is_empty() or not qc_values:
+            return [], {}, {}
+        
+        errors = []
+        undefined_volumes = {}
+        qc_report = {}
+        
+        # Check if sheet has segments
+        has_segments = 'column_type' in metadata.columns and (
+            metadata['column_type'] == 'segment'
+        ).any()
+        
+        if not has_segments:
+            # No segments to compare against
+            return [], {}, {}
+        
+        # Get segment columns only
+        segment_metadata = metadata.filter(pl.col('column_type') == 'segment')
+        
+        n_cases = len(data_df)
+        
+        # Group by property
+        for property_name, qc_value in qc_values.items():
+            # Get all segment columns for this property
+            prop_segment_cols = segment_metadata.filter(
+                pl.col('property') == property_name
+            )['column_name'].to_list()
+            
+            if not prop_segment_cols:
+                # No segments for this property, skip validation
+                continue
+            
+            # Sum all segment columns for ALL rows
+            try:
+                segment_sums = (
+                    data_df.select(prop_segment_cols)
+                    .select(pl.sum_horizontal(pl.all().cast(pl.Float64, strict=False)))
+                    .to_series()
+                    .to_numpy()
+                )
+                
+                # Use first row for reporting
+                first_row_sum = segment_sums[0]
+                
+                # Calculate undefined volumes (can be negative if segments > QC)
+                # undefined = QC - segments
+                undefined_per_case = qc_value - segment_sums
+                undefined_first_row = qc_value - first_row_sum
+                
+                # Check if significant (>5% of QC)
+                if abs(qc_value) > 1e-10:
+                    percent_undefined = (abs(undefined_first_row) / abs(qc_value)) * 100
+                else:
+                    percent_undefined = 0.0
+                
+                flagged = percent_undefined > 5.0
+                
+                # Get display unit (one order of magnitude larger than preference)
+                if unit_manager:
+                    display_mult = unit_manager.get_display_multiplier(property_name)
+                    
+                    # Use one order magnitude larger
+                    if display_mult == 1e-9:  # bcm -> mcm
+                        report_mult = 1e-6
+                        report_unit = 'mcm'
+                    elif display_mult == 1e-6:  # mcm -> kcm
+                        report_mult = 1e-3
+                        report_unit = 'kcm'
+                    elif display_mult == 1e-3:  # kcm -> m³
+                        report_mult = 1.0
+                        report_unit = 'm³'
+                    else:  # Default
+                        report_mult = 1.0
+                        report_unit = 'm³'
+                    
+                    qc_display = qc_value * report_mult
+                    segments_display = first_row_sum * report_mult
+                    undefined_display = undefined_first_row * report_mult
+                else:
+                    qc_display = qc_value
+                    segments_display = first_row_sum
+                    undefined_display = undefined_first_row
+                    report_unit = 'm³'
+                
+                # Store report data
+                qc_report[property_name] = {
+                    'qc': qc_display,
+                    'segments': segments_display,
+                    'undefined': undefined_display,
+                    'percent': percent_undefined,
+                    'flagged': flagged,
+                    'unit': report_unit
+                }
+                
+                # Store undefined volumes if non-zero
+                tolerance = max(abs(qc_value) * 1e-6, 1e-3)
+                if abs(undefined_first_row) > tolerance:
+                    undefined_volumes[property_name] = undefined_per_case
+                    
+            except Exception as e:
+                errors.append(
+                    f"Failed to validate '{property_name}': {str(e)}"
+                )
+        
+        return errors, undefined_volumes, qc_report
+    
+    @staticmethod
+    def compare_sheet_structures(
+        primary_structure: Dict[str, Any],
+        sheet_structure: Dict[str, Any],
+        primary_sheet_name: str,
+        sheet_name: str
+    ) -> List[str]:
+        """Compare sheet structure against primary sheet.
+        
+        Returns list of error messages (empty if structures match).
+        """
+        errors = []
+        
+        # Compare dynamic fields
+        if primary_structure['dynamic_fields'] != sheet_structure['dynamic_fields']:
+            errors.append(
+                f"Dynamic field mismatch between '{primary_sheet_name}' and '{sheet_name}':\n"
+                f"  Primary: {primary_structure['dynamic_fields']}\n"
+                f"  Current: {sheet_structure['dynamic_fields']}"
+            )
+        
+        # Compare segment presence
+        if primary_structure['has_segments'] != sheet_structure['has_segments']:
+            primary_type = "segments" if primary_structure['has_segments'] else "QC only"
+            current_type = "segments" if sheet_structure['has_segments'] else "QC only"
+            errors.append(
+                f"Structure type mismatch between '{primary_sheet_name}' and '{sheet_name}':\n"
+                f"  Primary: {primary_type}\n"
+                f"  Current: {current_type}"
+            )
+        
+        return errors
+    
+    def add_undefined_segment_columns(
+        self,
+        data_df: pl.DataFrame,
+        metadata: pl.DataFrame,
+        undefined_volumes: Dict[str, np.ndarray],
+        dynamic_fields: List[str],
+        sheet_name: str
+    ) -> Tuple[pl.DataFrame, pl.DataFrame]:
+        """Add columns for undefined segment volumes.
+        
+        Creates new segment columns for volumes not captured in defined segments.
+        These columns can be filtered like any other segment.
+        
+        Args:
+            data_df: Data DataFrame
+            metadata: Metadata DataFrame
+            undefined_volumes: Dict mapping property -> array of undefined volumes
+            dynamic_fields: List of dynamic field names (e.g., ['zone', 'boundary'])
+            sheet_name: Sheet name for error reporting
+            
+        Returns:
+            Tuple of (updated_data_df, updated_metadata_df)
+        """
+        if not undefined_volumes:
+            return data_df, metadata
+        
+        new_columns = {}
+        new_metadata_rows = []
+        
+        # Get the next column index
+        next_col_idx = len(data_df.columns)
+        
+        for property_name, volumes in undefined_volumes.items():
+            # Create column name following the pattern
+            # For example: "Undefined_Undefined_Bulk volume" if fields are ['zone', 'boundary']
+            undefined_labels = ['Undefined'] * len(dynamic_fields)
+            col_name = "_".join(undefined_labels + [property_name])
+            
+            # Add to new columns
+            new_columns[col_name] = volumes
+            
+            # Create metadata row
+            meta_row = {
+                'column_name': col_name,
+                'column_index': next_col_idx,
+                'property': property_name,
+                'column_type': 'segment',
+                'n_header_rows': len(dynamic_fields) + 1
+            }
+            
+            # Add dynamic field values (all 'undefined')
+            for field_name in dynamic_fields:
+                meta_row[field_name] = 'undefined'
+            
+            new_metadata_rows.append(meta_row)
+            next_col_idx += 1
+        
+        # Add new columns to dataframe
+        for col_name, values in new_columns.items():
+            data_df = data_df.with_columns(
+                pl.Series(name=col_name, values=values)
+            )
+        
+        # Add new metadata rows
+        if new_metadata_rows:
+            new_metadata_df = pl.DataFrame(new_metadata_rows)
+            metadata = pl.concat([metadata, new_metadata_df], how='vertical')
+        
+        return data_df, metadata
 
 
 # ================================================================
@@ -490,9 +817,15 @@ class DataExtractor:
         dynamic_fields: List[str],
         filters: Dict[str, Any],
         parameter: str,
-        cache_key: str
+        cache_key: str,
+        exclude_qc: bool = True  # NEW: Exclude QC columns by default
     ) -> Tuple[List[str], List[str]]:
-        """Select columns matching filters and return column names and sources."""
+        """Select columns matching filters and return column names and sources.
+        
+        Args:
+            exclude_qc: If True, exclude QC columns (single header row). 
+                       Set to False to include QC columns.
+        """
         if cache_key in self._column_selection_cache:
             return self._column_selection_cache[cache_key]
         
@@ -504,6 +837,10 @@ class DataExtractor:
         filters_norm = self.normalize_filters(filters)
 
         mask = pl.lit(True)
+
+        # NEW: Exclude QC columns if requested
+        if exclude_qc and 'column_type' in metadata.columns:
+            mask = mask & (pl.col('column_type') == 'segment')
 
         # Metadata-only keys that should not be used for filtering
         metadata_only_keys = {'name'}
@@ -551,7 +888,10 @@ class DataExtractor:
         filters: Dict[str, Any],
         cache_key: str
     ) -> Tuple[np.ndarray, List[str]]:
-        """Extract and sum values for columns matching filters."""
+        """Extract and sum values for columns matching filters.
+        
+        NOTE: This method automatically excludes QC columns and only uses segment columns.
+        """
         if cache_key in self._extraction_cache:
             cached_values, cached_sources = self._extraction_cache[cache_key]
             return cached_values.copy(), cached_sources.copy()
@@ -568,7 +908,8 @@ class DataExtractor:
                     single_filters = {**filters, field: value}
                     cols, sources = self.select_columns(
                         metadata, dynamic_fields, single_filters, parameter, 
-                        cache_key + f"_{field}_{value}"
+                        cache_key + f"_{field}_{value}",
+                        exclude_qc=True  # Always exclude QC
                     )
                     
                     arr = (
@@ -583,7 +924,8 @@ class DataExtractor:
             result = (combined, all_sources)
         else:
             cols, sources = self.select_columns(
-                metadata, dynamic_fields, filters, parameter, cache_key
+                metadata, dynamic_fields, filters, parameter, cache_key,
+                exclude_qc=True  # Always exclude QC
             )
             
             values = (
@@ -605,6 +947,22 @@ class DataExtractor:
             raise ValueError(f"No numeric data found for {description}")
         
         return values[np.isfinite(values)]
+    
+    @staticmethod
+    def validate_property_required(
+        filters: Dict[str, Any],
+        operation: str
+    ) -> None:
+        """Validate that property filter is specified.
+        
+        Raises ValueError if property missing or empty.
+        """
+        if not filters or 'property' not in filters or not filters['property']:
+            raise ValueError(
+                f"Property filter required for '{operation}' operation.\n"
+                f"Example: processor.{operation}(parameter='X', property='stoiip')\n"
+                f"Or: processor.{operation}(parameter='X', filters={{'property': 'stoiip', ...}})"
+            )
     
     def clear_cache(self) -> Dict[str, int]:
         """Clear all caches and return statistics."""
@@ -933,16 +1291,10 @@ class Case:
             for prop_name in property_names:
                 try:
                     prop_filters = {**non_property_filters, 'property': prop_name}
-                    cache_key = self._processor._create_cache_key(
-                        self.tornado_parameter, prop_filters
-                    )
-                    values, _ = self._processor.data_extractor.extract_values(
-                        self._processor.data[self.tornado_parameter],
-                        self._processor.metadata[self.tornado_parameter],
-                        self._processor.dynamic_fields[self.tornado_parameter],
+                    values, _ = self._processor._extract_property_values(
                         self.tornado_parameter,
                         prop_filters,
-                        cache_key
+                        validate_finite=False
                     )
                     if self.idx < len(values):
                         props[prop_name] = float(values[self.idx])
@@ -1068,7 +1420,7 @@ class CaseManager:
         case_index: int,
         filters: Dict[str, Any] = None
     ) -> Dict[str, float]:
-        """Extract values for a specific case index."""
+        """Extract values for a specific case index using centralized extraction."""
         if parameter not in self.processor.data:
             available = list(self.processor.data.keys())
             raise KeyError(
@@ -1094,14 +1446,10 @@ class CaseManager:
         for prop in properties:
             try:
                 prop_filters = {**base_filters, "property": prop}
-                cache_key = self.processor._create_cache_key(parameter, prop_filters)
-                values, _ = self.data_extractor.extract_values(
-                    self.processor.data[parameter],
-                    self.processor.metadata[parameter],
-                    self.processor.dynamic_fields[parameter],
+                values, _ = self.processor._extract_property_values(
                     parameter,
                     prop_filters,
-                    cache_key
+                    validate_finite=False
                 )
                 if len(values) > case_index:
                     case_values[prop] = float(values[case_index])
@@ -1272,14 +1620,10 @@ class CaseManager:
             for prop in all_properties:
                 try:
                     prop_filters = {**non_property_filters, "property": prop}
-                    cache_key = self.processor._create_cache_key(parameter, prop_filters)
-                    values, _ = self.data_extractor.extract_values(
-                        self.processor.data[parameter],
-                        self.processor.metadata[parameter],
-                        self.processor.dynamic_fields[parameter],
+                    values, _ = self.processor._extract_property_values(
                         parameter,
                         prop_filters,
-                        cache_key
+                        validate_finite=False
                     )
                     if index < len(values):
                         raw_value = values[index]
@@ -1765,16 +2109,11 @@ class StatisticsComputer:
             
             try:
                 prop_filters = {**filters, 'property': prop}
-                cache_key_full = self.processor._create_cache_key(parameter, prop_filters)
-                prop_vals, _ = self.data_extractor.extract_values(
-                    self.processor.data[parameter],
-                    self.processor.metadata[parameter],
-                    self.processor.dynamic_fields[parameter],
+                prop_vals, _ = self.processor._extract_property_values(
                     parameter,
                     prop_filters,
-                    cache_key_full
+                    validate_finite=True
                 )
-                prop_vals = self.data_extractor.validate_numeric(prop_vals, prop)
                 property_values[prop] = prop_vals
             except Exception as e:
                 if "errors" not in skip:
@@ -2074,14 +2413,10 @@ class StatisticsComputer:
         for prop in volumetric_properties:
             try:
                 prop_filters = {**base_filters, 'property': prop}
-                cache_key = self.processor._create_cache_key(parameter, prop_filters)
-                values, _ = self.data_extractor.extract_values(
-                    self.processor.data[parameter],
-                    self.processor.metadata[parameter],
-                    self.processor.dynamic_fields[parameter],
+                values, _ = self.processor._extract_property_values(
                     parameter,
                     prop_filters,
-                    cache_key
+                    validate_finite=False
                 )
                 
                 # Format for display
@@ -2234,11 +2569,22 @@ class TornadoProcessor:
         self.default_variables: List[str] = None
         self.base_case_parameter: str = base_case
         
+        # NEW: QC and structure validation storage
+        self.qc_values: Dict[str, Dict[str, float]] = {}
+        self.qc_errors: Dict[str, List[str]] = {}
+        self.qc_reports: Dict[str, Dict[str, Dict[str, float]]] = {}  # Store QC report data
+        self.flagged_properties: Dict[str, List[str]] = {}  # Properties with >5% undefined
+        self.sheet_stats: Dict[str, Dict[str, Any]] = {}  # Store sheet statistics
+        self.has_segments: Dict[str, bool] = {}
+        self.structure_info: Dict[str, Dict[str, Any]] = {}
+        self._loading_log: List[str] = []  # Store loading messages
+        
         # Parse all sheets
         try:
             self._parse_all_sheets()
         except Exception as e:
             print(f"[!] Warning: some sheets failed to parse: {e}")
+            raise
         
         # Initialize case manager (needs processor to be set up first)
         self.case_manager = CaseManager(self, self.unit_manager, self.data_extractor)
@@ -2252,25 +2598,123 @@ class TornadoProcessor:
         if base_case:
             try:
                 self.case_manager.extract_base_and_reference_cases(base_case)
+                self._loading_log.append(f"Base/reference cases extracted from '{base_case}'")
+            except KeyError as e:
+                # Soft error - base case sheet doesn't exist
+                print(f"[!] Warning: Base case sheet '{base_case}' not found. "
+                      f"base_case() and ref_case() methods will not be available.")
+                self._loading_log.append(f"⚠ Base case sheet '{base_case}' not found")
             except Exception as e:
-                print(f"[!] Warning: failed to extract base/reference case from '{base_case}': {e}")
+                print(f"[!] Warning: Failed to extract base/reference cases from '{base_case}': {e}")
+                self._loading_log.append(f"⚠ Failed to extract base/reference cases: {str(e)}")
+    
+    def loading_log(self, show_qc_details: bool = True):
+        """Print detailed loading log with QC validation and processing information.
+        
+        Args:
+            show_qc_details: If True, show detailed QC breakdown per sheet
+        """
+        print("\n" + "=" * 80)
+        print("LOADING LOG")
+        print("=" * 80)
+        
+        if not self._loading_log:
+            print("No loading information available.")
+            print("=" * 80 + "\n")
+            return
+        
+        # Print summary
+        print("\nSummary:")
+        for entry in self._loading_log:
+            if entry.startswith("✓"):
+                print(f"  [✓] {entry[2:]}")
+            elif entry.startswith("✗"):
+                print(f"  [✗] {entry[2:]}")
+            elif entry.startswith("i"):
+                print(f"  [i] {entry[2:]}")
+            elif entry.startswith("⚠"):
+                print(f"  [⚠] {entry[2:]}")
+            else:
+                print(f"      {entry}")
+        
+        # Print combined sheet stats and QC details if requested
+        if show_qc_details and (self.qc_reports or self.sheet_stats):
+            print("\n" + "-" * 80)
+            print("SHEET DETAILS")
+            print("-" * 80)
+            
+            for sheet_name in self.data.keys():
+                # Get statistics
+                stats = self.sheet_stats.get(sheet_name, {})
+                qc_report = self.qc_reports.get(sheet_name, {})
+                
+                # Print sheet header with inline stats
+                print(f"\nSheet: {sheet_name}")
+                
+                if stats:
+                    stats_parts = []
+                    stats_parts.append(f"Properties: {stats.get('n_properties', 0)}")
+                    stats_parts.append(f"Variables: {stats.get('n_variables', 0)}")
+                    stats_parts.append(f"Metadata: {len(stats.get('metadata', []))}")
+                    stats_parts.append(f"Cases: {stats.get('n_cases', 0)}")
+                    
+                    print("  " + " | ".join(stats_parts))
+                    
+                    if stats.get('dynamic_fields'):
+                        fields_str = ", ".join(stats['dynamic_fields'])
+                        print(f"  Dynamic fields: {fields_str}")
+                
+                # Print QC details if available
+                if qc_report:
+                    print()  # Blank line before QC data
+                    
+                    # Sort properties: flagged first, then alphabetically
+                    props_sorted = sorted(
+                        qc_report.items(),
+                        key=lambda x: (not x[1]['flagged'], x[0])
+                    )
+                    
+                    for prop, info in props_sorted:
+                        flag_str = "⚠" if info['flagged'] else " "
+                        unit_str = f" {info['unit']}"
+                        
+                        # Format with consistent width
+                        qc_str = f"{info['qc']:>12,.2f}{unit_str}"
+                        seg_str = f"{info['segments']:>12,.2f}{unit_str}"
+                        undef_str = f"{info['undefined']:>+12,.2f}{unit_str}"
+                        pct_str = f"({abs(info['percent']):>5.1f}%)"
+                        
+                        print(f"  {flag_str} {prop:<20} | QC: {qc_str} | Seg: {seg_str} | Undef: {undef_str} {pct_str}")
+            
+            # Print flag legend
+            if any(self.flagged_properties.values()):
+                print("\n  ⚠ = Flagged: |Undefined| > 5% of QC value")
+        
+        print("\n" + "=" * 80 + "\n")
     
     def _parse_all_sheets(self):
-        """Parse all loaded sheets and store results."""
+        """Parse all loaded sheets and store results with QC validation."""
         first_sheet = True
         first_sheet_name = None
+        primary_structure = None
         
         for sheet_name, df_raw in self.sheets_raw.items():
             try:
-                data, metadata, fields, info = self.data_loader.parse_sheet(df_raw, sheet_name)
+                # Parse sheet with QC extraction
+                data, metadata, fields, info, qc_values, structure_info = self.data_loader.parse_sheet(
+                    df_raw, sheet_name
+                )
                 
                 sheet_units = self.data_loader.extract_sheet_property_units(metadata)
                 
                 if first_sheet:
                     self.unit_manager.property_units.update(sheet_units)
+                    primary_structure = structure_info
                     first_sheet = False
                     first_sheet_name = sheet_name
+                    self._loading_log.append(f"Primary sheet: '{sheet_name}'")
                 else:
+                    # Validate unit consistency
                     for prop, unit in sheet_units.items():
                         if prop in self.unit_manager.property_units:
                             if self.unit_manager.property_units[prop] != unit:
@@ -2284,16 +2728,104 @@ class TornadoProcessor:
                                     f"  Sheet '{first_sheet_name}' uses: {stored_short}\n"
                                     f"  Sheet '{sheet_name}' uses: {current_short}"
                                 )
+                    
+                    # Validate structure consistency
+                    structure_errors = self.data_loader.compare_sheet_structures(
+                        primary_structure,
+                        structure_info,
+                        first_sheet_name,
+                        sheet_name
+                    )
+                    if structure_errors:
+                        for error in structure_errors:
+                            print(f"\n[!] Structure validation error:\n{error}")
+                        raise ValueError(
+                            f"Sheet '{sheet_name}' has different structure than primary sheet '{first_sheet_name}'. "
+                            f"All sheets must have the same dynamic fields and segment structure."
+                        )
                 
+                # Normalize data values
                 data = self.data_loader.normalize_data_values(data, metadata, sheet_name)
                 
+                # Normalize QC values to same units as data
+                qc_values_normalized = self.data_loader.normalize_qc_values(qc_values, sheet_name)
+                
+                # Validate QC against segments and get undefined volumes
+                qc_errors, undefined_volumes, qc_report = self.data_loader.validate_qc_data(
+                    data, metadata, qc_values_normalized, sheet_name, self.unit_manager
+                )
+                
+                # Store QC report and identify flagged properties
+                if qc_report:
+                    self.qc_reports[sheet_name] = qc_report
+                    flagged = [prop for prop, info in qc_report.items() if info['flagged']]
+                    if flagged:
+                        self.flagged_properties[sheet_name] = flagged
+                
+                # Collect sheet statistics
+                n_cases = len(data)
+                n_variables = len([col for col in data.columns if col.startswith('$')])
+                n_properties = len(metadata['property'].unique()) if not metadata.is_empty() else 0
+                
+                # Extract metadata info (non-empty values from info dict)
+                metadata_items = []
+                for key, value in info.items():
+                    if value and str(value).strip():
+                        # Limit length for display
+                        val_str = str(value)
+                        if len(val_str) > 50:
+                            val_str = val_str[:47] + "..."
+                        metadata_items.append(f"{key}: {val_str}")
+                
+                self.sheet_stats[sheet_name] = {
+                    'n_cases': n_cases,
+                    'n_variables': n_variables,
+                    'n_properties': n_properties,
+                    'metadata': metadata_items,
+                    'dynamic_fields': fields
+                }
+                
+                # Add undefined segment columns if any
+                if undefined_volumes:
+                    data, metadata = self.data_loader.add_undefined_segment_columns(
+                        data, metadata, undefined_volumes, fields, sheet_name
+                    )
+                
+                # Store parsed data
                 self.data[sheet_name] = data
                 self.metadata[sheet_name] = metadata
                 self.dynamic_fields[sheet_name] = fields
                 self.info[sheet_name] = info
                 
+                # Store normalized QC values and structure info
+                self.qc_values[sheet_name] = qc_values_normalized
+                self.structure_info[sheet_name] = structure_info
+                self.has_segments[sheet_name] = structure_info['has_segments']
+                self.qc_errors[sheet_name] = qc_errors
+                
+                # Log results
+                if qc_errors:
+                    # Major errors - print immediately
+                    print(f"\n[!] Critical errors in '{sheet_name}':")
+                    for error in qc_errors:
+                        print(f"    {error}")
+                    self._loading_log.append(f"✗ {sheet_name}: {len(qc_errors)} critical error(s)")
+                else:
+                    if qc_report:
+                        n_flagged = len([p for p, info in qc_report.items() if info['flagged']])
+                        if n_flagged > 0:
+                            self._loading_log.append(f"⚠ {sheet_name}: {n_flagged} flagged properties (>5% undefined)")
+                        else:
+                            self._loading_log.append(f"✓ {sheet_name}: QC passed")
+                    elif qc_values_normalized:
+                        self._loading_log.append(f"i {sheet_name}: QC only (no segments)")
+                    else:
+                        self._loading_log.append(f"i {sheet_name}: Loaded")
+                
             except Exception as e:
-                print(f"[!] Skipped sheet '{sheet_name}': {e}")
+                print(f"[!] Failed to parse sheet '{sheet_name}': {e}")
+                self._loading_log.append(f"✗ {sheet_name}: Failed to parse - {str(e)}")
+                raise
     
     def _resolve_parameter(self, parameter: str = None) -> str:
         """Resolve parameter name, defaulting to first if None."""
@@ -2318,6 +2850,75 @@ class TornadoProcessor:
         key_parts.extend(str(arg) for arg in args)
         
         return ":".join(key_parts)
+    
+    def _check_flagged_properties(
+        self,
+        parameter: str,
+        properties: Union[str, List[str]]
+    ) -> None:
+        """Check if properties are flagged and print warning if needed.
+        
+        Prints a single warning listing all flagged properties being used.
+        """
+        if parameter not in self.flagged_properties:
+            return
+        
+        flagged_in_param = self.flagged_properties[parameter]
+        if not flagged_in_param:
+            return
+        
+        # Normalize property input to list
+        if isinstance(properties, str):
+            props_to_check = [properties.lower()]
+        elif isinstance(properties, list):
+            props_to_check = [p.lower() for p in properties]
+        else:
+            return
+        
+        # Find which properties being used are flagged
+        flagged_used = [p for p in props_to_check if p in flagged_in_param]
+        
+        if flagged_used:
+            props_str = ", ".join(f"'{p}'" for p in flagged_used)
+            print(f"[!] Warning: Using flagged properties with >5% undefined volumes: {props_str}")
+            print(f"    Parameter: '{parameter}' | Use processor.loading_log() for details")
+    
+    def _extract_property_values(
+        self,
+        parameter: str,
+        filters: Dict[str, Any],
+        validate_finite: bool = True
+    ) -> Tuple[np.ndarray, List[str]]:
+        """Central method for extracting property values.
+        
+        Single source of truth for property extraction logic.
+        """
+        # Validate property present
+        if 'property' not in filters:
+            raise ValueError("Property must be specified in filters")
+        
+        # Check for flagged properties and warn
+        self._check_flagged_properties(parameter, filters['property'])
+        
+        # Create cache key
+        cache_key = self._create_cache_key(parameter, filters)
+        
+        # Extract using DataExtractor
+        values, sources = self.data_extractor.extract_values(
+            self.data[parameter],
+            self.metadata[parameter],
+            self.dynamic_fields[parameter],
+            parameter,
+            filters,
+            cache_key
+        )
+        
+        # Validate if requested
+        if validate_finite:
+            prop = filters['property']
+            values = self.data_extractor.validate_numeric(values, prop)
+        
+        return values, sources
     
     # ================================================================
     # PUBLIC API - INFORMATION ACCESS
@@ -2376,6 +2977,126 @@ class TornadoProcessor:
         return self.info.get(resolved, {})
     
     # ================================================================
+    # PUBLIC API - QC VALIDATION REPORTING
+    # ================================================================
+    
+    def get_qc_errors(self, parameter: str = None) -> Union[Dict[str, List[str]], List[str]]:
+        """Get QC validation errors.
+        
+        Args:
+            parameter: Optional parameter name. If None, returns all errors.
+        
+        Returns:
+            If parameter is None: Dict mapping parameter names to error lists
+            If parameter is specified: List of errors for that parameter
+        """
+        if parameter is None:
+            return {k: v for k, v in self.qc_errors.items() if v}
+        
+        resolved = self._resolve_parameter(parameter)
+        return self.qc_errors.get(resolved, [])
+    
+    def get_undefined_segments(self, parameter: str = None) -> Union[Dict[str, List[str]], List[str]]:
+        """Get list of properties with undefined segments.
+        
+        Undefined segments contain volumes outside defined regions (e.g., boundaries, zones).
+        These segments are automatically created during initialization and can be filtered
+        using the value 'undefined' for any dynamic field.
+        
+        Args:
+            parameter: Optional parameter name. If None, returns info for all parameters.
+        
+        Returns:
+            If parameter is None: Dict mapping parameter names to lists of properties with undefined segments
+            If parameter is specified: List of properties with undefined segments for that parameter
+        
+        Example:
+            >>> # Check which properties have undefined segments
+            >>> undefined = processor.get_undefined_segments('Full_Uncertainty')
+            >>> print(undefined)
+            ['bulk volume', 'net volume', 'pore volume']
+            
+            >>> # Filter to get only undefined volumes
+            >>> result = processor.compute(
+            ...     'mean',
+            ...     parameter='Full_Uncertainty',
+            ...     filters={'zone': 'undefined'},  # or 'boundary': 'undefined'
+            ...     property='stoiip'
+            ... )
+        """
+        if parameter is None:
+            result = {}
+            for sheet_name in self.data.keys():
+                if sheet_name in self.metadata and not self.metadata[sheet_name].is_empty():
+                    if 'column_type' in self.metadata[sheet_name].columns:
+                        for field in self.dynamic_fields.get(sheet_name, []):
+                            if field in self.metadata[sheet_name].columns:
+                                undefined_rows = self.metadata[sheet_name].filter(
+                                    (pl.col('column_type') == 'segment') & 
+                                    (pl.col(field) == 'undefined')
+                                )
+                                if len(undefined_rows) > 0:
+                                    result[sheet_name] = undefined_rows['property'].unique().to_list()
+                                    break
+            return result
+        else:
+            resolved = self._resolve_parameter(parameter)
+            if resolved in self.metadata and not self.metadata[resolved].is_empty():
+                if 'column_type' in self.metadata[resolved].columns:
+                    for field in self.dynamic_fields.get(resolved, []):
+                        if field in self.metadata[resolved].columns:
+                            undefined_rows = self.metadata[resolved].filter(
+                                (pl.col('column_type') == 'segment') & 
+                                (pl.col(field) == 'undefined')
+                            )
+                            if len(undefined_rows) > 0:
+                                return undefined_rows['property'].unique().to_list()
+            return []
+    
+    def print_qc_summary(self):
+        """Print summary of QC validation results for all sheets."""
+        print("\n" + "=" * 60)
+        print("QC VALIDATION SUMMARY")
+        print("=" * 60)
+        
+        has_errors = False
+        has_flagged = False
+        
+        for sheet_name in self.data.keys():
+            errors = self.qc_errors.get(sheet_name, [])
+            qc_vals = self.qc_values.get(sheet_name, {})
+            has_segs = self.has_segments.get(sheet_name, False)
+            flagged = self.flagged_properties.get(sheet_name, [])
+            
+            if qc_vals and has_segs:
+                if errors:
+                    print(f"\n[✗] {sheet_name}:")
+                    for error in errors:
+                        print(f"    {error}")
+                    has_errors = True
+                elif flagged:
+                    print(f"\n[⚠] {sheet_name}: QC passed, {len(flagged)} flagged properties")
+                    print(f"    Flagged (>5% undefined): {', '.join(flagged)}")
+                    has_flagged = True
+                else:
+                    print(f"\n[✓] {sheet_name}: All QC checks passed ({len(qc_vals)} properties)")
+            elif qc_vals and not has_segs:
+                print(f"\n[i] {sheet_name}: QC only (no segments to validate)")
+            else:
+                print(f"\n[i] {sheet_name}: No QC values found")
+        
+        print("\n" + "=" * 60)
+        if has_errors:
+            print("⚠️  Some critical QC errors detected. Please review.")
+        elif has_flagged:
+            print("✅ QC validation passed!")
+            print("⚠️  Some properties flagged: |Undefined| > 5% of QC")
+            print("    Use processor.loading_log() for detailed breakdown")
+        else:
+            print("✅ All QC validations passed!")
+        print("=" * 60 + "\n")
+    
+    # ================================================================
     # PUBLIC API - CASE ACCESS
     # ================================================================
     
@@ -2415,11 +3136,33 @@ class TornadoProcessor:
     # ================================================================
     
     def base_case(self) -> Case:
-        """Get base case as a Case object."""
+        """Get base case as a Case object.
+        
+        Raises:
+            ValueError: If base case sheet was not found during initialization
+        """
+        if not self.case_manager.base_case_values:
+            raise ValueError(
+                f"Base case not available. Sheet '{self.base_case_parameter}' was not found in Excel file.\n"
+                f"Available sheets: {list(self.data.keys())}\n"
+                f"To fix: Create a sheet named '{self.base_case_parameter}' or specify a different "
+                f"base_case parameter when initializing TornadoProcessor."
+            )
         return self.case_manager.get_case(0, self.base_case_parameter)
     
     def ref_case(self) -> Case:
-        """Get reference case as a Case object."""
+        """Get reference case as a Case object.
+        
+        Raises:
+            ValueError: If base case sheet was not found during initialization
+        """
+        if not self.case_manager.reference_case_values:
+            raise ValueError(
+                f"Reference case not available. Sheet '{self.base_case_parameter}' was not found in Excel file.\n"
+                f"Available sheets: {list(self.data.keys())}\n"
+                f"To fix: Create a sheet named '{self.base_case_parameter}' or specify a different "
+                f"base_case parameter when initializing TornadoProcessor."
+            )
         return self.case_manager.get_case(1, self.base_case_parameter)
     
     # ================================================================
@@ -2451,6 +3194,19 @@ class TornadoProcessor:
         skip = options.get("skip", [])
         decimals = options.get("decimals", 6)
 
+        # NEW: Validate that property is specified for operations that require it
+        if isinstance(stats, str):
+            stats_list = [stats]
+        else:
+            stats_list = stats
+        
+        requires_property = {'distribution', 'mean', 'median', 'std', 'cv', 
+                             'sum', 'variance', 'range', 'minmax', 'p90p10', 
+                             'p1p99', 'p25p75', 'percentile'}
+        
+        if any(s in requires_property for s in stats_list):
+            DataExtractor.validate_property_required(filters, 'compute')
+
         property_filter = filters.get("property")
         is_multi_property = isinstance(property_filter, list)
         
@@ -2467,16 +3223,11 @@ class TornadoProcessor:
             for prop in property_filter:
                 try:
                     prop_filters = {**non_property_filters, "property": prop}
-                    cache_key = self._create_cache_key(resolved, prop_filters)
-                    prop_vals, _ = self.data_extractor.extract_values(
-                        self.data[resolved],
-                        self.metadata[resolved],
-                        self.dynamic_fields[resolved],
+                    prop_vals, _ = self._extract_property_values(
                         resolved,
                         prop_filters,
-                        cache_key
+                        validate_finite=True
                     )
-                    prop_vals = self.data_extractor.validate_numeric(prop_vals, prop)
                     property_values[prop] = prop_vals
                 except Exception as e:
                     if "errors" not in skip:
@@ -2485,16 +3236,11 @@ class TornadoProcessor:
         else:
             prop = filters.get("property", "value")
             try:
-                cache_key = self._create_cache_key(resolved, filters)
-                values, _ = self.data_extractor.extract_values(
-                    self.data[resolved],
-                    self.metadata[resolved],
-                    self.dynamic_fields[resolved],
+                values, _ = self._extract_property_values(
                     resolved,
                     filters,
-                    cache_key
+                    validate_finite=True
                 )
-                values = self.data_extractor.validate_numeric(values, prop)
                 property_values[prop] = values
             except Exception as e:
                 if "errors" not in skip:
@@ -2556,6 +3302,19 @@ class TornadoProcessor:
         """Compute statistics for multiple parameters."""
         filters = self.filter_manager.resolve_filter_preset(filters)
         filters = FilterManager.merge_property_filter(filters, property)
+
+        # NEW: Validate property for operations that require it
+        if isinstance(stats, str):
+            stats_list = [stats]
+        else:
+            stats_list = stats
+        
+        requires_property = {'distribution', 'mean', 'median', 'std', 'cv', 
+                             'sum', 'variance', 'range', 'minmax', 'p90p10', 
+                             'p1p99', 'p25p75', 'percentile'}
+        
+        if any(s in requires_property for s in stats_list):
+            DataExtractor.validate_property_required(filters, 'compute_batch')
 
         if parameters == "all":
             param_list = list(self.data.keys())
@@ -2787,54 +3546,6 @@ class TornadoProcessor:
             - Constant variables (zero variance) are INCLUDED but their correlations are set to 0.0.
               This is important for QC - knowing a variable doesn't vary is valuable information.
             - Warnings about division by zero are suppressed for constant variables.
-        
-        Example:
-            >>> # Minimal usage (requires default_variables to be set)
-            >>> processor.default_variables = ['Porosity', 'NTG', 'Sw']
-            >>> corr = processor.correlation_grid('Full_Uncertainty')
-            >>> 
-            >>> # Check for constant variables (important for QC!)
-            >>> if corr['constant_variables']:
-            ...     print("⚠️  Constant variables (no variance):")
-            ...     for var, value in corr['constant_variables']:
-            ...         print(f"   - {var} = {value} (correlation set to 0.0)")
-            >>> # Output: Structure_variation = 1.0 (correlation set to 0.0)
-            >>> 
-            >>> # Check if any variables were skipped
-            >>> if corr['skipped_variables']:
-            ...     print(f"Skipped: {corr['skipped_variables']}")
-            >>> # Output: Skipped: [('WellName', 'non-numeric (string) data')]
-            >>> 
-            >>> # With explicit variables (mixing numeric, string, and constant)
-            >>> corr = processor.correlation_grid(
-            ...     parameter='Full_Uncertainty',
-            ...     variables=['Porosity', 'NTG', 'WellName', 'Structure_variation']
-            ... )
-            >>> print(f"Included: {corr['variables']}")  
-            >>> # ['Porosity', 'NTG', 'Structure_variation']
-            >>> # Note: Structure_variation included even though constant!
-            >>> 
-            >>> # With filters (applied only to properties)
-            >>> corr = processor.correlation_grid(
-            ...     parameter='Full_Uncertainty',
-            ...     filters={'zone': 'zone1', 'fluid': 'oil'}
-            ... )
-            >>> 
-            >>> # Print as table
-            >>> import pandas as pd
-            >>> df = pd.DataFrame(corr['matrix'], 
-            ...                   index=corr['variables'], 
-            ...                   columns=corr['properties'])
-            >>> print(df)
-            >>> 
-            >>> # Create heatmap (constant variables will show as 0.0)
-            >>> import seaborn as sns
-            >>> sns.heatmap(corr['matrix'], 
-            ...            xticklabels=corr['properties'],
-            ...            yticklabels=corr['variables'],
-            ...            annot=True, fmt='.2f', cmap='coolwarm', 
-            ...            center=0, vmin=-1, vmax=1, square=True)
-            >>> plt.title(f"Correlation Matrix - {corr['parameter']}")
         """
         # Resolve parameter
         resolved = self._resolve_parameter(parameter)
@@ -3007,6 +3718,9 @@ class TornadoProcessor:
             self.properties(resolved_parameter)
         )
         resolved_filters = FilterManager.merge_property_filter(resolved_filters, property)
+
+        # NEW: Validate property is required for distribution
+        DataExtractor.validate_property_required(resolved_filters, 'distribution')
 
         compute_result = self.compute(
             stats="distribution",
