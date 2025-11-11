@@ -13,6 +13,7 @@ def distribution_plot(
     target_bins=20,
     color="blue",
     reference_case=None,
+    figsize=None,
     settings=None
 ):
     """
@@ -40,6 +41,7 @@ def distribution_plot(
         target_bins: Target number of bins for histogram (default 20)
         color: Color scheme - "red", "blue", "green", "orange", "purple", "fuchsia", "yellow"
         reference_case: Optional reference case value to plot as vertical line
+        figsize: Figure size as (width, height) tuple (default: (10, 6))
         settings: Dictionary of visual settings to override defaults
 
     Returns:
@@ -155,6 +157,10 @@ def distribution_plot(
     }
     if settings:
         s.update(settings)
+
+    # Apply direct figsize parameter (takes precedence over settings)
+    if figsize is not None:
+        s["figsize"] = figsize
 
     # --- Convert data to numpy array ---
     distribution_data = np.array(distribution_data)

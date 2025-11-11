@@ -3233,7 +3233,52 @@ class TornadoProcessor:
     # ================================================================
     # PUBLIC API - STATISTICS COMPUTATION
     # ================================================================
-    
+
+    def _auto_detect_property(
+        self,
+        filters: Union[Dict[str, Any], str],
+        property: Union[str, List[str], bool, None]
+    ) -> Tuple[Union[Dict[str, Any], str, None], Union[str, List[str], bool, None]]:
+        """Auto-detect if filters argument is actually a property name.
+
+        Returns:
+            Tuple of (filters, property) with corrected values
+        """
+        # Only auto-detect if filters is a string and property is not explicitly set
+        if not isinstance(filters, str) or property is not None:
+            return filters, property
+
+        # Check if it's NOT a stored filter
+        if filters in self.filter_manager.stored_filters:
+            return filters, property
+
+        # Check if it contains underscore (filter_property pattern)
+        if '_' in filters:
+            return filters, property
+
+        # Likely a property name - check against known properties or available columns
+        is_property = False
+
+        # Check if it's in known unit manager properties
+        normalized_name = filters.lower().strip()
+        if normalized_name in self.unit_manager.display_formats:
+            is_property = True
+
+        # Check if it's in available case properties
+        if not is_property and hasattr(self, 'cases') and len(self.cases) > 0:
+            sample_case = self.cases[0]
+            if hasattr(sample_case, '_properties'):
+                # Parse property name to handle units
+                prop_clean, _ = self.unit_manager.parse_property_unit(filters)
+                if prop_clean.lower() in [p.lower() for p in sample_case._properties.keys()]:
+                    is_property = True
+
+        # If it's a property, move it from filters to property parameter
+        if is_property:
+            return None, filters
+
+        return filters, property
+
     def compute(
         self,
         stats: Union[str, List[str]],
@@ -3246,6 +3291,9 @@ class TornadoProcessor:
         selection_criteria: Dict[str, Any] = None
     ) -> Union[Dict, Tuple[Dict, List[Case]]]:
         """Compute statistics for a single parameter with filters."""
+        # Auto-detect if first argument is a property name
+        filters, property = self._auto_detect_property(filters, property)
+
         resolved = self._resolve_parameter(parameter)
 
         filters = self.filter_manager.resolve_filter_preset(
@@ -3365,6 +3413,9 @@ class TornadoProcessor:
         sort_by_range: bool = True
     ) -> Union[Dict, List[Dict], Tuple[List[Dict], List[Case]]]:
         """Compute statistics for multiple parameters."""
+        # Auto-detect if first argument is a property name
+        filters, property = self._auto_detect_property(filters, property)
+
         filters = self.filter_manager.resolve_filter_preset(filters)
         filters = FilterManager.merge_property_filter(filters, property)
 
@@ -3668,6 +3719,9 @@ class TornadoProcessor:
                 existing_skip = [existing_skip]
             merged_options['skip'] = list(set(existing_skip + skip_list))
 
+        # Auto-detect if first argument is a property name
+        filters, property = self._auto_detect_property(filters, property)
+
         # Extract filter name and property for tornado plot metadata
         filter_name = None
         property_name = None
@@ -3747,6 +3801,9 @@ class TornadoProcessor:
                 - 'filter_name': str filter name if extracted from filter preset
             For multiple properties: Dict mapping property names to the above dict structure
         """
+        # Auto-detect if first argument is a property name
+        filters, property = self._auto_detect_property(filters, property)
+
         # Store original filter string before resolution
         original_filter_str = filters if isinstance(filters, str) else None
 

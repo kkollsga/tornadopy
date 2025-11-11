@@ -15,6 +15,7 @@ from pathlib import Path
 def correlation_plot(
     correlation_data,
     outfile=None,
+    figsize=None,
     settings=None
 ):
     """
@@ -35,6 +36,9 @@ def correlation_plot(
 
     outfile : str or Path, optional
         Path to save the figure. Supports formats: .png, .svg, .pdf, .jpg
+
+    figsize : tuple, optional
+        Figure size as (width, height) tuple (default: (12, 8))
 
     settings : dict, optional
         Dictionary to override default visual settings. Available keys:
@@ -129,6 +133,10 @@ def correlation_plot(
     # Merge with user-provided settings
     if settings:
         s.update(settings)
+
+    # Apply direct figsize parameter (takes precedence over settings)
+    if figsize is not None:
+        s["figsize"] = figsize
 
     # Extract data from correlation_data dictionary
     parameter = correlation_data.get('parameter', 'Correlation Matrix')

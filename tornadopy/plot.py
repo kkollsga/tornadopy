@@ -15,6 +15,7 @@ def tornado_plot(
     unit=None,
     filter_name=None,
     preferred_order=None,
+    figsize=None,
     settings=None
 ):
     """
@@ -32,6 +33,19 @@ def tornado_plot(
     - auto-detects base, reference_case, filter_name, property_name, and unit from sections
     - subtitle format: "<filter name>  |  Base case: xx   Ref case: xx unit" (centered, unit after last value)
     - x-axis label format: "PROPERTY (unit)" e.g., "STOIIP (mcm)"
+
+    Args:
+        sections: List of dicts with tornado data
+        title: Chart title (default: "Tornado Chart")
+        subtitle: Custom subtitle (optional, auto-generated if None)
+        outfile: Path to save figure (optional)
+        base: Base case value (auto-detected from sections if None)
+        reference_case: Reference case value for vertical line (optional)
+        unit: Unit string (auto-detected from sections if None)
+        filter_name: Filter name for subtitle (auto-detected from sections if None)
+        preferred_order: List of parameter names to show first (optional)
+        figsize: Figure size as (width, height) tuple (default: (10, 7))
+        settings: Dict of additional settings to override defaults
     """
     # Auto-detect base, reference_case, filter_name, property_name, and unit from sections
     auto_base = None
@@ -121,6 +135,10 @@ def tornado_plot(
     }
     if settings:
         s.update(settings)
+
+    # Apply direct figsize parameter (takes precedence over settings)
+    if figsize is not None:
+        s["figsize"] = figsize
 
     # --- Subtitle ---
     # Format: "<filter name>  |  Base case: xx   Ref case: xx mcm"
