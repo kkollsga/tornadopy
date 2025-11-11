@@ -14,7 +14,10 @@ def distribution_plot(
     color="blue",
     reference_case=None,
     figsize=None,
-    settings=None
+    settings=None,
+    bin_number=None,
+    bin_start=None,
+    bin_end=None
 ):
     """
     Generate a distribution histogram with cumulative curve.
@@ -38,11 +41,14 @@ def distribution_plot(
         title: Chart title (optional if data is dict with 'title' key, format: "{parameter} distribution")
         unit: Unit label for x-axis and subtitle (optional if data is dict with 'unit' key)
         outfile: Output file path (if specified, saves the figure)
-        target_bins: Target number of bins for histogram (default 20)
+        target_bins: Target number of bins for histogram with beautiful edges (default 20)
         color: Color scheme - "red", "blue", "green", "orange", "purple", "fuchsia", "yellow"
         reference_case: Optional reference case value to plot as vertical line
         figsize: Figure size as (width, height) tuple (default: (10, 6))
         settings: Dictionary of visual settings to override defaults
+        bin_number: Manual number of bins (if specified, overrides target_bins and disables beautiful edges)
+        bin_start: Manual start of the histogram range (optional, can be used with bin_number or target_bins)
+        bin_end: Manual end of the histogram range (optional, can be used with bin_number or target_bins)
 
     Returns:
         Tuple of (fig, ax, saved):
@@ -64,8 +70,34 @@ def distribution_plot(
         >>> #  'unit': 'bcm',
         >>> #  'parameter': 'Parameter_1',
         >>> #  'filter_name': 'Cerisa'}
+        >>>
+        >>> # Default: Beautiful bins with automatic range
         >>> fig, ax, saved = distribution_plot(
         ...     dist,
+        ...     outfile="distribution.png"
+        ... )
+        >>>
+        >>> # Manual bin number: exact number of bins (no beautiful edges)
+        >>> fig, ax, saved = distribution_plot(
+        ...     dist,
+        ...     bin_number=25,
+        ...     outfile="distribution.png"
+        ... )
+        >>>
+        >>> # Manual range with beautiful bins
+        >>> fig, ax, saved = distribution_plot(
+        ...     dist,
+        ...     bin_start=0,
+        ...     bin_end=1000,
+        ...     outfile="distribution.png"
+        ... )
+        >>>
+        >>> # Manual bin number with custom range
+        >>> fig, ax, saved = distribution_plot(
+        ...     dist,
+        ...     bin_number=30,
+        ...     bin_start=0,
+        ...     bin_end=1000,
         ...     outfile="distribution.png"
         ... )
         >>> # Plot will show:
@@ -188,10 +220,17 @@ def distribution_plot(
     else:
         subtitle = f"P90: {p90:.2f}   P50: {p50:.2f}   P10: {p10:.2f}{unit_str}"
 
-    # --- Calculate beautiful bins ---
-    def get_beautiful_bins(data, target_bins):
+    # --- Calculate bins ---
+    def get_beautiful_bins(data, target_bins, manual_start=None, manual_end=None):
         """Create bins with nice round numbers"""
         data_min, data_max = data.min(), data.max()
+
+        # Use manual range if provided, otherwise use data range
+        if manual_start is not None:
+            data_min = manual_start
+        if manual_end is not None:
+            data_max = manual_end
+
         data_range = data_max - data_min
 
         # Calculate initial bin width
@@ -211,13 +250,29 @@ def distribution_plot(
             beautiful_width = 10 * magnitude
 
         # Create bin edges
-        bin_start = np.floor(data_min / beautiful_width) * beautiful_width
-        bin_end = np.ceil(data_max / beautiful_width) * beautiful_width
+        if manual_start is not None:
+            bin_start = manual_start
+        else:
+            bin_start = np.floor(data_min / beautiful_width) * beautiful_width
+
+        if manual_end is not None:
+            bin_end = manual_end
+        else:
+            bin_end = np.ceil(data_max / beautiful_width) * beautiful_width
+
         bins = np.arange(bin_start, bin_end + beautiful_width, beautiful_width)
 
         return bins
 
-    bins = get_beautiful_bins(distribution_data, target_bins)
+    # Determine which binning method to use
+    if bin_number is not None:
+        # Manual bin number: create exact number of bins (no beautiful edges)
+        data_min = bin_start if bin_start is not None else distribution_data.min()
+        data_max = bin_end if bin_end is not None else distribution_data.max()
+        bins = np.linspace(data_min, data_max, bin_number + 1)
+    else:
+        # Beautiful bins (default)
+        bins = get_beautiful_bins(distribution_data, target_bins, bin_start, bin_end)
 
     # --- Figure setup ---
     plt.close("all")
