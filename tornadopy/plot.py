@@ -1,23 +1,28 @@
 from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple, Union, TYPE_CHECKING
 
 import matplotlib.pyplot as plt
 import matplotlib.patheffects as patheffects
 from matplotlib.ticker import AutoMinorLocator, FormatStrFormatter
 
+if TYPE_CHECKING:
+    from matplotlib.figure import Figure
+    from matplotlib.axes import Axes
+
 
 def tornado_plot(
-    sections,
-    title="Tornado Chart",
-    subtitle=None,
-    outfile=None,
-    base=None,
-    reference_case=None,
-    unit=None,
-    filter_name=None,
-    preferred_order=None,
-    figsize=None,
-    settings=None
-):
+    sections: List[Dict[str, Any]],
+    title: str = "Tornado Chart",
+    subtitle: Optional[str] = None,
+    outfile: Optional[Union[str, Path]] = None,
+    base: Optional[float] = None,
+    reference_case: Optional[float] = None,
+    unit: Optional[str] = None,
+    filter_name: Optional[str] = None,
+    preferred_order: Optional[List[str]] = None,
+    figsize: Optional[Tuple[float, float]] = None,
+    settings: Optional[Dict[str, Any]] = None
+) -> Tuple[Optional["Figure"], Optional["Axes"], Optional[str]]:
     """
     Tornado chart with:
     - inside/outside label control

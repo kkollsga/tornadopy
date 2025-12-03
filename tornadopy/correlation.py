@@ -5,19 +5,25 @@ This module provides functionality to visualize correlation matrices from
 TornadoPy's correlation_grid() function results.
 """
 
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple, Union, TYPE_CHECKING
+
 import matplotlib.pyplot as plt
 import matplotlib.patheffects as patheffects
 from matplotlib.colors import LinearSegmentedColormap
 import numpy as np
-from pathlib import Path
+
+if TYPE_CHECKING:
+    from matplotlib.figure import Figure
+    from matplotlib.axes import Axes
 
 
 def correlation_plot(
-    correlation_data,
-    outfile=None,
-    figsize=None,
-    settings=None
-):
+    correlation_data: Dict[str, Any],
+    outfile: Optional[Union[str, Path]] = None,
+    figsize: Optional[Tuple[float, float]] = None,
+    settings: Optional[Dict[str, Any]] = None
+) -> Tuple["Figure", "Axes", bool]:
     """
     Create a beautiful correlation matrix heatmap.
 

@@ -1,24 +1,29 @@
 from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple, Union, TYPE_CHECKING
 
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.ticker import AutoMinorLocator, MultipleLocator
 
+if TYPE_CHECKING:
+    from matplotlib.figure import Figure
+    from matplotlib.axes import Axes
+
 
 def distribution_plot(
-    data,
-    title=None,
-    unit=None,
-    outfile=None,
-    target_bins=20,
-    color="blue",
-    reference_case=None,
-    figsize=None,
-    settings=None,
-    bin_number=None,
-    bin_start=None,
-    bin_end=None
-):
+    data: Union[Dict[str, Any], np.ndarray, List[float]],
+    title: Optional[str] = None,
+    unit: Optional[str] = None,
+    outfile: Optional[Union[str, Path]] = None,
+    target_bins: int = 20,
+    color: str = "blue",
+    reference_case: Optional[float] = None,
+    figsize: Optional[Tuple[float, float]] = None,
+    settings: Optional[Dict[str, Any]] = None,
+    bin_number: Optional[int] = None,
+    bin_start: Optional[float] = None,
+    bin_end: Optional[float] = None
+) -> Tuple["Figure", "Axes", Optional[str]]:
     """
     Generate a distribution histogram with cumulative curve.
 
