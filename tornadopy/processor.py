@@ -636,27 +636,46 @@ class ExcelDataLoader:
             
             # Sum all segment columns for ALL rows
             try:
+                segment_block = data_df.select(prop_segment_cols)
+
+                # Detect non-numeric values before casting
+                n_non_numeric = 0
+                non_numeric_examples = []
+                for col in prop_segment_cols:
+                    col_series = segment_block[col]
+                    casted = col_series.cast(pl.Float64, strict=False)
+                    # Values that were non-null before but became null after cast
+                    was_non_null = col_series.is_not_null() & (col_series.cast(pl.Utf8).str.strip_chars() != "")
+                    became_null = casted.is_null() & was_non_null
+                    n_bad = became_null.sum()
+                    if n_bad > 0:
+                        n_non_numeric += n_bad
+                        # Grab a few examples of the bad values
+                        if len(non_numeric_examples) < 3:
+                            bad_vals = col_series.filter(became_null).head(2).to_list()
+                            non_numeric_examples.extend(str(v) for v in bad_vals)
+
                 segment_sums = (
-                    data_df.select(prop_segment_cols)
+                    segment_block
                     .select(pl.sum_horizontal(pl.all().cast(pl.Float64, strict=False)))
                     .to_series()
                     .to_numpy()
                 )
-                
+
                 # NEW: Calculate undefined per row using QC value from that row
                 undefined_per_case = qc_column_values - segment_sums
-                
+
                 # Use first row for reporting
                 qc_first_row = qc_column_values[0]
                 first_row_sum = segment_sums[0]
                 undefined_first_row = undefined_per_case[0]
-                
+
                 # Check if significant (>5% of QC)
                 if abs(qc_first_row) > 1e-10:
                     percent_undefined = (abs(undefined_first_row) / abs(qc_first_row)) * 100
                 else:
                     percent_undefined = 0.0
-                
+
                 flagged = percent_undefined > 5.0
                 
                 # Get display unit (one order of magnitude larger than preference)
@@ -693,7 +712,9 @@ class ExcelDataLoader:
                     'undefined': undefined_display,
                     'percent': percent_undefined,
                     'flagged': flagged,
-                    'unit': report_unit
+                    'unit': report_unit,
+                    'n_non_numeric': n_non_numeric,
+                    'non_numeric_examples': non_numeric_examples[:3],
                 }
                 
                 # Store undefined volumes if non-zero
@@ -2834,7 +2855,7 @@ class TornadoProcessor:
                                     f"  Sheet '{sheet_name}' uses: {current_short}"
                                 )
                     
-                    # Validate structure consistency
+                    # Check structure consistency (soft warning, not fatal)
                     structure_errors = self.data_loader.compare_sheet_structures(
                         primary_structure,
                         structure_info,
@@ -2842,11 +2863,10 @@ class TornadoProcessor:
                         sheet_name
                     )
                     if structure_errors:
-                        for error in structure_errors:
-                            print(f"\n[!] Structure validation error:\n{error}")
-                        raise ValueError(
-                            f"Sheet '{sheet_name}' has different structure than primary sheet '{first_sheet_name}'. "
-                            f"All sheets must have the same dynamic fields and segment structure."
+                        self._loading_log.append(
+                            f"⚠ {sheet_name}: Different structure than '{first_sheet_name}' "
+                            f"({', '.join(structure_info['dynamic_fields'])} vs "
+                            f"{', '.join(primary_structure['dynamic_fields'])})"
                         )
                 
                 # Normalize data values
@@ -2919,13 +2939,38 @@ class TornadoProcessor:
                     if qc_report:
                         n_flagged = len([p for p, info in qc_report.items() if info['flagged']])
                         if n_flagged > 0:
-                            # NEW: Print warning immediately with proper grammar
-                            flagged_props = [p for p, info in qc_report.items() if info['flagged']]
+                            flagged_items = {p: info for p, info in qc_report.items() if info['flagged']}
                             property_word = "property" if n_flagged == 1 else "properties"
-                            print(f"\n[!] Warning: Sheet '{sheet_name}' has {n_flagged} flagged {property_word} with >5% undefined volumes")
-                            print(f"    Flagged: {', '.join(flagged_props)}")
-                            print(f"    Run processor.loading_log() for detailed breakdown")
-                            self._loading_log.append(f"⚠ {sheet_name}: {n_flagged} flagged {property_word} (>5% undefined)")
+
+                            # Check if non-numeric values are the cause
+                            total_non_numeric = sum(
+                                info.get('n_non_numeric', 0) for info in flagged_items.values()
+                            )
+                            all_examples = []
+                            for info in flagged_items.values():
+                                all_examples.extend(info.get('non_numeric_examples', []))
+
+                            if total_non_numeric > 0:
+                                examples_str = ", ".join(f"'{e}'" for e in all_examples[:4])
+                                print(f"\n[!] Warning: Sheet '{sheet_name}' has {total_non_numeric} "
+                                      f"non-numeric cell(s) in segment data")
+                                print(f"    Examples: {examples_str}")
+                                print(f"    This is likely caused by Excel auto-formatting numbers as dates")
+                                print(f"    Affected: {', '.join(flagged_items.keys())}")
+                                print(f"    Run processor.loading_log() for detailed breakdown")
+                                self._loading_log.append(
+                                    f"⚠ {sheet_name}: {total_non_numeric} non-numeric cells "
+                                    f"in {', '.join(flagged_items.keys())} "
+                                    f"(e.g. {examples_str})"
+                                )
+                            else:
+                                print(f"\n[!] Warning: Sheet '{sheet_name}' has {n_flagged} flagged "
+                                      f"{property_word} where segment totals differ >5% from QC totals")
+                                print(f"    Flagged: {', '.join(flagged_items.keys())}")
+                                print(f"    Run processor.loading_log() for detailed breakdown")
+                                self._loading_log.append(
+                                    f"⚠ {sheet_name}: {n_flagged} flagged {property_word} (>5% undefined)"
+                                )
                         else:
                             self._loading_log.append(f"✓ {sheet_name}: QC passed")
                     elif qc_values_normalized:
