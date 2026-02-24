@@ -287,18 +287,42 @@ class ExcelDataLoader:
         sheet_name: str = "unknown"
     ) -> Tuple[pl.DataFrame, pl.DataFrame, List[str], Dict, Dict[str, float], Dict[str, Any]]:
         """Parse individual sheet into data, metadata, dynamic fields, info, QC values, and structure info.
-        
+
         Returns:
             Tuple of (data_df, metadata_df, dynamic_fields, info_dict, qc_values, structure_info)
         """
-        # Find "Case" row
+        if df.width == 0:
+            raise ValueError(
+                f"Sheet '{sheet_name}' is empty (no columns). "
+                f"Expected a tornado data sheet with a 'Case' header row."
+            )
+        if df.height == 0:
+            raise ValueError(
+                f"Sheet '{sheet_name}' has no rows (only column headers). "
+                f"Expected at least a 'Case' header row and data rows below it."
+            )
+
+        # Find "Case" row - this marks the boundary between metadata/headers and data
+        first_col = df.columns[0]
+        first_col_values = df[first_col].cast(pl.Utf8).str.strip_chars()
         case_mask = df.select(
-            pl.col(df.columns[0]).cast(pl.Utf8).str.strip_chars() == "Case"
+            pl.col(first_col).cast(pl.Utf8).str.strip_chars() == "Case"
         ).to_series()
-        
+
         case_row_idx = case_mask.arg_true().to_list()
         if not case_row_idx:
-            raise ValueError("No 'Case' row found in sheet")
+            # Show what's actually in the first column to help diagnose
+            non_null = first_col_values.drop_nulls()
+            non_empty = [v for v in non_null.to_list() if v and v.strip()]
+            preview = non_empty[:5]
+            preview_str = ", ".join(f"'{v}'" for v in preview)
+            if len(non_empty) > 5:
+                preview_str += f", ... ({len(non_empty)} values total)"
+            raise ValueError(
+                f"No 'Case' row found in sheet '{sheet_name}'. "
+                f"The first column contains: [{preview_str}]. "
+                f"Expected a row with 'Case' in column A to separate headers from data."
+            )
         case_row = case_row_idx[0]
         
         # Extract metadata from rows above headers
@@ -373,7 +397,16 @@ class ExcelDataLoader:
             combined_headers.append("_".join(labels) if labels else "")
         
         if len(set(combined_headers)) < len(combined_headers):
-            raise ValueError("Duplicate column headers detected")
+            seen = set()
+            dupes = []
+            for h in combined_headers:
+                if h in seen and h not in dupes:
+                    dupes.append(h)
+                seen.add(h)
+            raise ValueError(
+                f"Sheet '{sheet_name}' has duplicate column headers: {dupes}. "
+                f"Each column must have a unique header combination."
+            )
         
         data_block.columns = combined_headers
         data_block = data_block.select([
@@ -2639,11 +2672,24 @@ class TornadoProcessor:
         self._loading_log: List[str] = []  # Store loading messages
         
         # Parse all sheets
-        try:
-            self._parse_all_sheets()
-        except Exception as e:
-            print(f"[!] Warning: some sheets failed to parse: {e}")
-            raise
+        self._failed_sheets: List[Tuple[str, str]] = []
+        self._parse_all_sheets()
+
+        if self._failed_sheets:
+            failed_details = "\n".join(
+                f"  - '{name}': {reason}" for name, reason in self._failed_sheets
+            )
+            if not self.data:
+                raise ValueError(
+                    f"All {len(self._failed_sheets)} sheet(s) failed to parse. No usable data found.\n"
+                    f"Failed sheets:\n{failed_details}"
+                )
+            else:
+                n_ok = len(self.data)
+                n_fail = len(self._failed_sheets)
+                skipped_names = ", ".join(f"'{name}'" for name, _ in self._failed_sheets)
+                print(f"[i] Skipped {n_fail} unparseable sheet(s): {skipped_names}")
+                print(f"    Loaded {n_ok} sheet(s) successfully. Run processor.loading_log() for details.")
         
         # Initialize case manager (needs processor to be set up first)
         self.case_manager = CaseManager(self, self.unit_manager, self.data_extractor)
@@ -2888,9 +2934,8 @@ class TornadoProcessor:
                         self._loading_log.append(f"i {sheet_name}: Loaded")
                 
             except Exception as e:
-                print(f"[!] Failed to parse sheet '{sheet_name}': {e}")
                 self._loading_log.append(f"✗ {sheet_name}: Failed to parse - {str(e)}")
-                raise
+                self._failed_sheets.append((sheet_name, str(e)))
     
     def _resolve_parameter(self, parameter: str = None) -> str:
         """Resolve parameter name, defaulting to first if None."""
