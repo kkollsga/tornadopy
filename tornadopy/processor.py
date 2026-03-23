@@ -457,13 +457,24 @@ class ExcelDataLoader:
         
         metadata_df = pl.DataFrame(metadata_rows) if metadata_rows else pl.DataFrame()
         
+        # Build mapping from data column name -> original Excel column index
+        # combined_headers[i] = original column i, but select may remove some
+        col_name_to_excel_col = {}
+        for i, header in enumerate(combined_headers):
+            final_name = header
+            if final_name == "Case":
+                final_name = "property"
+            col_name_to_excel_col[final_name] = i
+
         # Create structure info for comparison
         has_segments = any(ct == 'segment' for ct in column_types)
         structure_info = {
             'dynamic_fields': dynamic_labels,
             'has_segments': has_segments,
             'n_qc_columns': sum(1 for ct in column_types if ct == 'qc'),
-            'n_segment_columns': sum(1 for ct in column_types if ct == 'segment')
+            'n_segment_columns': sum(1 for ct in column_types if ct == 'segment'),
+            'col_name_to_excel_col': col_name_to_excel_col,
+            'data_start_row': case_row + 2,  # 1-indexed Excel row where data begins
         }
         
         return data_block, metadata_df, dynamic_labels, info_dict, qc_values, structure_info
@@ -557,13 +568,26 @@ class ExcelDataLoader:
         
         return normalized
     
+    @staticmethod
+    def _excel_col_letter(col_idx: int) -> str:
+        """Convert 0-based column index to Excel column letter (A, B, ..., Z, AA, AB, ...)."""
+        result = ""
+        idx = col_idx
+        while True:
+            result = chr(ord('A') + idx % 26) + result
+            idx = idx // 26 - 1
+            if idx < 0:
+                break
+        return result
+
     def validate_qc_data(
         self,
         data_df: pl.DataFrame,
         metadata: pl.DataFrame,
         qc_values: Dict[str, float],
         sheet_name: str,
-        unit_manager: 'UnitManager' = None
+        unit_manager: 'UnitManager' = None,
+        structure_info: Dict[str, Any] = None
     ) -> Tuple[List[str], Dict[str, np.ndarray], Dict[str, Dict[str, float]]]:
         """Validate QC sums against segment totals.
         
@@ -640,20 +664,23 @@ class ExcelDataLoader:
 
                 # Detect non-numeric values before casting
                 n_non_numeric = 0
-                non_numeric_examples = []
+                bad_cells = []  # List of "CellRef='value'" strings
+                col_map = structure_info.get('col_name_to_excel_col', {}) if structure_info else {}
+                data_start_row = structure_info.get('data_start_row', 1) if structure_info else 1
                 for col in prop_segment_cols:
                     col_series = segment_block[col]
                     casted = col_series.cast(pl.Float64, strict=False)
-                    # Values that were non-null before but became null after cast
                     was_non_null = col_series.is_not_null() & (col_series.cast(pl.Utf8).str.strip_chars() != "")
                     became_null = casted.is_null() & was_non_null
                     n_bad = became_null.sum()
                     if n_bad > 0:
                         n_non_numeric += n_bad
-                        # Grab a few examples of the bad values
-                        if len(non_numeric_examples) < 3:
-                            bad_vals = col_series.filter(became_null).head(2).to_list()
-                            non_numeric_examples.extend(str(v) for v in bad_vals)
+                        excel_col = self._excel_col_letter(col_map[col]) if col in col_map else col
+                        bad_row_indices = became_null.arg_true().to_list()
+                        for row_idx in bad_row_indices:
+                            excel_row = data_start_row + row_idx
+                            val = str(col_series[row_idx])
+                            bad_cells.append(f"{excel_col}{excel_row}='{val}'")
 
                 segment_sums = (
                     segment_block
@@ -714,7 +741,7 @@ class ExcelDataLoader:
                     'flagged': flagged,
                     'unit': report_unit,
                     'n_non_numeric': n_non_numeric,
-                    'non_numeric_examples': non_numeric_examples[:3],
+                    'bad_cells': bad_cells,
                 }
                 
                 # Store undefined volumes if non-zero
@@ -2698,7 +2725,7 @@ class TornadoProcessor:
 
         if self._failed_sheets:
             failed_details = "\n".join(
-                f"  - '{name}': {reason}" for name, reason in self._failed_sheets
+                f"    - '{name}': {reason}" for name, reason in self._failed_sheets
             )
             if not self.data:
                 raise ValueError(
@@ -2708,9 +2735,9 @@ class TornadoProcessor:
             else:
                 n_ok = len(self.data)
                 n_fail = len(self._failed_sheets)
-                skipped_names = ", ".join(f"'{name}'" for name, _ in self._failed_sheets)
-                print(f"[i] Skipped {n_fail} unparseable sheet(s): {skipped_names}")
-                print(f"    Loaded {n_ok} sheet(s) successfully. Run processor.loading_log() for details.")
+                print(f"[i] Loaded {n_ok} sheet(s), skipped {n_fail}:")
+                for name, reason in self._failed_sheets:
+                    print(f"    - '{name}': {reason}")
         
         # Initialize case manager (needs processor to be set up first)
         self.case_manager = CaseManager(self, self.unit_manager, self.data_extractor)
@@ -2877,7 +2904,8 @@ class TornadoProcessor:
                 
                 # Validate QC against segments and get undefined volumes
                 qc_errors, undefined_volumes, qc_report = self.data_loader.validate_qc_data(
-                    data, metadata, qc_values_normalized, sheet_name, self.unit_manager
+                    data, metadata, qc_values_normalized, sheet_name, self.unit_manager,
+                    structure_info=structure_info
                 )
                 
                 # Store QC report and identify flagged properties
@@ -2942,32 +2970,23 @@ class TornadoProcessor:
                             flagged_items = {p: info for p, info in qc_report.items() if info['flagged']}
                             property_word = "property" if n_flagged == 1 else "properties"
 
-                            # Check if non-numeric values are the cause
-                            total_non_numeric = sum(
-                                info.get('n_non_numeric', 0) for info in flagged_items.values()
-                            )
-                            all_examples = []
+                            # Collect all bad cells across flagged properties
+                            all_bad_cells = []
                             for info in flagged_items.values():
-                                all_examples.extend(info.get('non_numeric_examples', []))
+                                all_bad_cells.extend(info.get('bad_cells', []))
 
-                            if total_non_numeric > 0:
-                                examples_str = ", ".join(f"'{e}'" for e in all_examples[:4])
-                                print(f"\n[!] Warning: Sheet '{sheet_name}' has {total_non_numeric} "
-                                      f"non-numeric cell(s) in segment data")
-                                print(f"    Examples: {examples_str}")
-                                print(f"    This is likely caused by Excel auto-formatting numbers as dates")
-                                print(f"    Affected: {', '.join(flagged_items.keys())}")
-                                print(f"    Run processor.loading_log() for detailed breakdown")
+                            if all_bad_cells:
+                                preview = ", ".join(all_bad_cells[:4])
+                                suffix = ", ..." if len(all_bad_cells) > 4 else ""
+                                print(f"[!] Sheet '{sheet_name}': {len(all_bad_cells)} non-numeric cells "
+                                      f"(Excel date formatting?): [{preview}{suffix}]")
                                 self._loading_log.append(
-                                    f"⚠ {sheet_name}: {total_non_numeric} non-numeric cells "
-                                    f"in {', '.join(flagged_items.keys())} "
-                                    f"(e.g. {examples_str})"
+                                    f"⚠ {sheet_name}: {len(all_bad_cells)} non-numeric cells "
+                                    f"in {', '.join(flagged_items.keys())}"
                                 )
                             else:
-                                print(f"\n[!] Warning: Sheet '{sheet_name}' has {n_flagged} flagged "
-                                      f"{property_word} where segment totals differ >5% from QC totals")
-                                print(f"    Flagged: {', '.join(flagged_items.keys())}")
-                                print(f"    Run processor.loading_log() for detailed breakdown")
+                                print(f"[!] Sheet '{sheet_name}': {n_flagged} {property_word} where "
+                                      f"segment totals differ >5% from QC: {', '.join(flagged_items.keys())}")
                                 self._loading_log.append(
                                     f"⚠ {sheet_name}: {n_flagged} flagged {property_word} (>5% undefined)"
                                 )
