@@ -381,7 +381,7 @@ class ExcelDataLoader:
                 property_name_raw = labels[0]
                 property_name, unit = self.unit_manager.parse_property_unit(property_name_raw)
                 property_clean = property_name.strip().lower()
-                
+
                 # Get first data value (before normalization)
                 if len(data_block) > 0:
                     try:
@@ -396,18 +396,15 @@ class ExcelDataLoader:
             column_types.append(column_type)
             combined_headers.append("_".join(labels) if labels else "")
         
-        if len(set(combined_headers)) < len(combined_headers):
-            seen = set()
-            dupes = []
-            for h in combined_headers:
-                if h in seen and h not in dupes:
-                    dupes.append(h)
-                seen.add(h)
-            raise ValueError(
-                f"Sheet '{sheet_name}' has duplicate column headers: {dupes}. "
-                f"Each column must have a unique header combination."
-            )
-        
+        # Deduplicate column headers by appending suffix (_2, _3, ...)
+        seen_counts: Dict[str, int] = {}
+        for i, header in enumerate(combined_headers):
+            if header in seen_counts:
+                seen_counts[header] += 1
+                combined_headers[i] = f"{header}_{seen_counts[header]}"
+            else:
+                seen_counts[header] = 1
+
         data_block.columns = combined_headers
         data_block = data_block.select([
             col for col in data_block.columns 
