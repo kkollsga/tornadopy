@@ -1,11 +1,14 @@
 import re
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Dict, List, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import polars as pl
 from fastexcel import read_excel
+
+
+_NO_ARG = object()  # Sentinel for distinguishing "no argument" from "None"
 
 
 # ================================================================
@@ -2712,6 +2715,7 @@ class Dataset:
         self.dynamic_fields: Dict[str, List[str]] = {}
         self.default_variables: List[str] = None
         self.base_case_parameter: str = base_case
+        self._active_filter: Optional[Dict[str, Any]] = None
         
         # NEW: QC and structure validation storage
         self.qc_values: Dict[str, Dict[str, float]] = {}
@@ -3520,6 +3524,8 @@ class Dataset:
         """
         resolved = self._resolve_parameter(parameter)
 
+        if filters is None and self._active_filter is not None:
+            filters = self._active_filter
         filters = self.filter_manager.resolve_filter_preset(filters)
         filters = FilterManager.merge_property_filter(filters, property)
 
@@ -3638,6 +3644,8 @@ class Dataset:
         Filters must not contain a 'property' key — pass property explicitly via the
         property kwarg.
         """
+        if filters is None and self._active_filter is not None:
+            filters = self._active_filter
         filters = self.filter_manager.resolve_filter_preset(filters)
         filters = FilterManager.merge_property_filter(filters, property)
 
@@ -3827,6 +3835,8 @@ class Dataset:
 
         variables_normalized = [v.lstrip('$') for v in variables]
 
+        if filters is None and self._active_filter is not None:
+            filters = self._active_filter
         filter_name = filters if isinstance(filters, str) else None
         filters = self.filter_manager.resolve_filter_preset(filters)
 
@@ -3985,18 +3995,41 @@ class Dataset:
     # PUBLIC API - FILTER & CACHE MANAGEMENT
     # ================================================================
     
+    def filter(
+        self,
+        filters: Union[Dict[str, Any], str, None] = _NO_ARG,
+    ) -> Optional[Dict[str, Any]]:
+        """Get/set the dataset's active filter.
+
+        Subsequent plot/compute calls that don't pass an explicit ``filters``
+        argument use this filter automatically.
+
+        Examples:
+            >>> ds.filter({"contact_regions": ["cerisa main"]})  # set
+            >>> ds.filter("north")                               # set from preset
+            >>> ds.filter()                                      # get current
+            >>> ds.filter(None)                                  # clear
+        """
+        if filters is _NO_ARG:
+            return self._active_filter
+        if filters is None:
+            self._active_filter = None
+            return None
+        self._active_filter = self.filter_manager.resolve_filter_preset(filters)
+        return self._active_filter
+
     def set_filter(self, name: str, filters: Dict[str, Any]) -> None:
         """Store a named filter preset."""
         self.filter_manager.set_filter(name, filters)
-    
+
     def set_filters(self, filters_dict: Dict[str, Dict[str, Any]]) -> None:
         """Store multiple named filter presets."""
         self.filter_manager.set_filters(filters_dict)
-    
+
     def get_filter(self, name: str) -> Dict[str, Any]:
         """Retrieve a stored filter preset."""
         return self.filter_manager.get_filter(name)
-    
+
     def list_filters(self) -> List[str]:
         """List all stored filter preset names."""
         return self.filter_manager.list_filters()

@@ -97,6 +97,15 @@ ds.set_filters({
 })
 ds.list_filters()        # ['north', 'south']
 ds.get_filter("north")   # {'zone': [...]}
+
+# Active filter — applied to every plot/compute call that doesn't pass `filters=`
+ds.filter({"contact_regions": ["cerisa main"]})   # set
+ds.filter("north")                                # set from a stored preset
+ds.filter()                                       # get current
+ds.filter(None)                                   # clear
+
+tornado_plot(ds, property="stoiip")               # uses the active filter
+tornado_plot(ds, property="stoiip", filters="south")  # explicit override
 ```
 
 ## Default parameter
