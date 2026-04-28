@@ -3146,7 +3146,116 @@ class TornadoProcessor:
         """Get metadata info for a parameter."""
         resolved = self._resolve_parameter(parameter)
         return self.info.get(resolved, {})
-    
+
+    def describe(self, parameter: str = None, max_values: int = 20) -> None:
+        """Print a quick overview of properties, dynamic fields, filter values,
+        stored filter presets and usage examples — everything needed to set up
+        a tornado or distribution plot.
+
+        Args:
+            parameter: If given, only describe this parameter. Otherwise all.
+            max_values: Truncate dynamic-field value lists longer than this.
+        """
+        params = [parameter] if parameter else list(self.data.keys())
+        base_param = self.base_case_parameter
+
+        print("\n" + "=" * 72)
+        print(" TORNADOPROCESSOR — DESCRIBE")
+        print("=" * 72)
+        print(f" File: {self.filepath.name}")
+        print(f" Parameters: {len(self.data)} | Base case sheet: '{base_param}'")
+        print("=" * 72)
+
+        for p in params:
+            if p not in self.data:
+                print(f"\n[!] Parameter '{p}' not found.")
+                continue
+
+            tag = "  (base case)" if p == base_param else ""
+            n_cases = len(self.data[p]) if p in self.data else 0
+            print(f"\n● {p}{tag}")
+            print(f"  Cases: {n_cases}")
+
+            # Properties + units
+            try:
+                props = self.properties(p)
+            except ValueError:
+                props = []
+            if props:
+                units = self.unit_manager.get_property_units()
+                prop_lines = [
+                    f"{prop} [{units[prop]}]" if prop in units and units[prop] else prop
+                    for prop in props
+                ]
+                print(f"  Properties ({len(props)}): {', '.join(prop_lines)}")
+            else:
+                print("  Properties: (none)")
+
+            # Dynamic fields and their unique values
+            fields = self.dynamic_fields.get(p, [])
+            if fields:
+                print(f"  Dynamic fields ({len(fields)}):")
+                for f in fields:
+                    try:
+                        vals = self.unique_values(f, parameter=p)
+                    except ValueError:
+                        vals = []
+                    if not vals:
+                        print(f"    - {f}: (no values)")
+                        continue
+                    if len(vals) > max_values:
+                        shown = ", ".join(str(v) for v in vals[:max_values])
+                        print(f"    - {f} ({len(vals)} values): {shown}, ... +{len(vals) - max_values} more")
+                    else:
+                        print(f"    - {f}: {', '.join(str(v) for v in vals)}")
+            else:
+                print("  Dynamic fields: (none)")
+
+        # Stored filter presets
+        stored = self.list_filters()
+        print("\n" + "-" * 72)
+        if stored:
+            print(f" Stored filter presets ({len(stored)}):")
+            for name in stored:
+                print(f"   '{name}': {self.get_filter(name)}")
+        else:
+            print(" Stored filter presets: (none — use processor.set_filter(...) to add)")
+
+        # Usage examples
+        example_param = params[0] if params and params[0] in self.data else None
+        example_prop = None
+        example_field = None
+        example_value = None
+        if example_param:
+            try:
+                ps = self.properties(example_param)
+                example_prop = ps[0] if ps else None
+            except ValueError:
+                pass
+            fs = self.dynamic_fields.get(example_param, [])
+            if fs:
+                example_field = fs[0]
+                try:
+                    vs = self.unique_values(example_field, parameter=example_param)
+                    example_value = vs[0] if vs else None
+                except ValueError:
+                    pass
+
+        print("-" * 72)
+        print(" Usage:")
+        if example_prop and example_field and example_value is not None:
+            print(f"   processor.tornado(filters={{'property': '{example_prop}', "
+                  f"'{example_field}': '{example_value}'}})")
+            print(f"   processor.distribution(parameter='{example_param}', "
+                  f"filters={{'property': '{example_prop}', '{example_field}': '{example_value}'}})")
+            print(f"   processor.set_filter('my_filter', "
+                  f"{{'{example_field}': ['{example_value}'], 'property': '{example_prop}'}})")
+            print("   processor.tornado(filters='my_filter')")
+        else:
+            print("   processor.tornado(filters={'property': '<prop>'})")
+            print("   processor.distribution(parameter='<param>', filters={'property': '<prop>'})")
+        print("=" * 72 + "\n")
+
     # ================================================================
     # PUBLIC API - QC VALIDATION REPORTING
     # ================================================================
@@ -3939,6 +4048,19 @@ class TornadoProcessor:
             result_dict, _ = compute_result
         else:
             result_dict = compute_result
+
+        if "distribution" not in result_dict:
+            errors = result_dict.get("errors", [])
+            if errors:
+                raise ValueError(
+                    "distribution() failed to produce data. Underlying error(s):\n  - "
+                    + "\n  - ".join(str(e) for e in errors)
+                )
+            raise ValueError(
+                "distribution() returned no data and no error was captured. "
+                "Check that filters match existing columns "
+                "(use processor.describe() to inspect available fields/values)."
+            )
 
         distribution_data = result_dict["distribution"]
 
