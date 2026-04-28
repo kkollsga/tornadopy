@@ -49,7 +49,7 @@ jobs:
 
       - name: Test import
         run: |
-          python -c "from tornadopy import TornadoProcessor, tornado_plot; print('✓ Import successful')"
+          python -c "from tornadopy import Dataset, tornado_plot; print('✓ Import successful')"
 
   build:
     name: Build distribution
