@@ -15,10 +15,10 @@ pip install tornadopy
 ## Quick start
 
 ```python
-from tornadopy import TornadoProcessor, tornado_plot, distribution_plot, correlation_plot
+from tornadopy import Dataset, tornado_plot, distribution_plot, correlation_plot
 
 # 1. Load the Excel workbook into a dataset
-ds = TornadoProcessor("uncertainty_results.xlsx")
+ds = Dataset("uncertainty_results.xlsx")
 
 # 2. (Optional) define reusable filter presets
 #    A filter is a spatial selection only — never include 'property' here.
@@ -40,7 +40,7 @@ fig, ax, _ = correlation_plot(
 ## API mental model
 
 ```
-TornadoProcessor                   the dataset
+Dataset                   the dataset
   └─ holds: data + filter presets + introspection
   └─ no opinions on which property or sheet to plot
 

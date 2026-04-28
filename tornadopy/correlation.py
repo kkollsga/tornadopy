@@ -13,7 +13,7 @@ import matplotlib.patheffects as patheffects
 from matplotlib.colors import LinearSegmentedColormap
 import numpy as np
 
-from .processor import TornadoProcessor
+from .processor import Dataset
 
 if TYPE_CHECKING:
     from matplotlib.figure import Figure
@@ -21,7 +21,7 @@ if TYPE_CHECKING:
 
 
 def correlation_plot(
-    ds: TornadoProcessor,
+    ds: Dataset,
     *,
     parameter: Optional[str] = None,
     filters: Union[Dict[str, Any], str, None] = None,
@@ -33,10 +33,10 @@ def correlation_plot(
     settings: Optional[Dict[str, Any]] = None,
 ) -> Tuple["Figure", "Axes", bool]:
     """
-    Render a Pearson correlation matrix heatmap from a TornadoProcessor dataset.
+    Render a Pearson correlation matrix heatmap from a Dataset.
 
     Args:
-        ds: TornadoProcessor dataset.
+        ds: Dataset.
         parameter: Sheet name. Defaults to the first sheet — a warning is printed
                    when defaulted.
         filters: Spatial filter dict ({field: value(s)}) or stored-filter name.
@@ -48,9 +48,9 @@ def correlation_plot(
         decimals: Decimals for correlation coefficients (default 2).
         outfile, figsize, settings: Plot styling — same as before.
     """
-    if not isinstance(ds, TornadoProcessor):
+    if not isinstance(ds, Dataset):
         raise TypeError(
-            "correlation_plot expects a TornadoProcessor as first argument. "
+            "correlation_plot expects a Dataset as first argument. "
             f"Got {type(ds).__name__}."
         )
 

@@ -5,7 +5,7 @@ import matplotlib.pyplot as plt
 import matplotlib.patheffects as patheffects
 from matplotlib.ticker import AutoMinorLocator, FormatStrFormatter
 
-from .processor import TornadoProcessor
+from .processor import Dataset
 
 if TYPE_CHECKING:
     from matplotlib.figure import Figure
@@ -13,7 +13,7 @@ if TYPE_CHECKING:
 
 
 def tornado_plot(
-    ds: TornadoProcessor,
+    ds: Dataset,
     *,
     property: str,
     filters: Union[Dict[str, Any], str, None] = None,
@@ -32,10 +32,10 @@ def tornado_plot(
     settings: Optional[Dict[str, Any]] = None,
 ) -> Tuple[Optional["Figure"], Optional["Axes"], Optional[str]]:
     """
-    Render a tornado chart from a TornadoProcessor dataset.
+    Render a tornado chart from a Dataset.
 
     Args:
-        ds: TornadoProcessor dataset.
+        ds: Dataset.
         property: Property to plot (e.g. 'stoiip').
         filters: Spatial filter dict ({field: value(s)}) or stored-filter name.
                  Must not contain a 'property' key.
@@ -49,9 +49,9 @@ def tornado_plot(
     - Subtitle format: "<filter name>  |  Base case: xx   Ref case: xx unit"
     - X-axis label format: "PROPERTY (unit)" e.g. "STOIIP (mcm)"
     """
-    if not isinstance(ds, TornadoProcessor):
+    if not isinstance(ds, Dataset):
         raise TypeError(
-            "tornado_plot expects a TornadoProcessor as first argument. "
+            "tornado_plot expects a Dataset as first argument. "
             f"Got {type(ds).__name__}."
         )
 

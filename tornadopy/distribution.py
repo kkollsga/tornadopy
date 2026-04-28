@@ -6,7 +6,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.ticker import AutoMinorLocator, MultipleLocator
 
-from .processor import TornadoProcessor
+from .processor import Dataset
 
 if TYPE_CHECKING:
     from matplotlib.figure import Figure
@@ -14,7 +14,7 @@ if TYPE_CHECKING:
 
 
 def distribution_plot(
-    ds: TornadoProcessor,
+    ds: Dataset,
     *,
     property: str,
     parameter: Optional[str] = None,
@@ -36,7 +36,7 @@ def distribution_plot(
     Distribution histogram (with cumulative curve) for one property of one parameter.
 
     Args:
-        ds: TornadoProcessor dataset.
+        ds: Dataset.
         property: Property to plot (e.g. 'stoiip').
         parameter: Sheet name. Defaults to the first sheet — a warning is printed
                    when defaulted.
@@ -46,9 +46,9 @@ def distribution_plot(
         title, unit, outfile, target_bins, color, reference_case, figsize,
         settings, bin_number, bin_start, bin_end: Plot styling — same as before.
     """
-    if not isinstance(ds, TornadoProcessor):
+    if not isinstance(ds, Dataset):
         raise TypeError(
-            "distribution_plot expects a TornadoProcessor as first argument. "
+            "distribution_plot expects a Dataset as first argument. "
             f"Got {type(ds).__name__}."
         )
 

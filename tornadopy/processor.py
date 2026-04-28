@@ -1126,7 +1126,7 @@ class Case:
     def __init__(
         self,
         data: Dict[str, Any],
-        processor: 'TornadoProcessor',
+        processor: 'Dataset',
         index: int = None,
         parameter: str = None,
         reference: str = None,
@@ -1514,7 +1514,7 @@ class CaseManager:
     
     def __init__(
         self,
-        processor: 'TornadoProcessor',
+        processor: 'Dataset',
         unit_manager: UnitManager,
         data_extractor: DataExtractor
     ):
@@ -1565,7 +1565,7 @@ class CaseManager:
                 f"Base case sheet '{parameter}' not found in Excel file. "
                 f"Available sheets: {available}. "
                 f"Either create a sheet named '{parameter}' or specify the correct "
-                f"base_case parameter when initializing TornadoProcessor."
+                f"base_case parameter when initializing Dataset."
             )
         
         case_df = self.processor.data[parameter]
@@ -1864,7 +1864,7 @@ class CaseManager:
                     f"Base case sheet '{param}' not found in Excel file. "
                     f"Available sheets: {available}. "
                     f"Either create a sheet named '{param}' or specify the correct "
-                    f"base_case parameter when initializing TornadoProcessor."
+                    f"base_case parameter when initializing Dataset."
                 )
 
             df = self.processor.data[param]
@@ -1962,7 +1962,7 @@ class StatisticsComputer:
     
     def __init__(
         self,
-        processor: 'TornadoProcessor',
+        processor: 'Dataset',
         unit_manager: UnitManager,
         data_extractor: DataExtractor,
         case_manager: CaseManager
@@ -2679,7 +2679,7 @@ class StatisticsComputer:
 # MAIN TORNADO PROCESSOR
 # ================================================================
 
-class TornadoProcessor:
+class Dataset:
     """Main orchestrator for tornado analysis."""
     
     def __init__(
@@ -3475,7 +3475,7 @@ class TornadoProcessor:
                 f"Base case not available. Sheet '{self.base_case_parameter}' was not found in Excel file.\n"
                 f"Available sheets: {list(self.data.keys())}\n"
                 f"To fix: Create a sheet named '{self.base_case_parameter}' or specify a different "
-                f"base_case parameter when initializing TornadoProcessor."
+                f"base_case parameter when initializing Dataset."
             )
         return self.case_manager.get_case(0, self.base_case_parameter)
     
@@ -3490,7 +3490,7 @@ class TornadoProcessor:
                 f"Reference case not available. Sheet '{self.base_case_parameter}' was not found in Excel file.\n"
                 f"Available sheets: {list(self.data.keys())}\n"
                 f"To fix: Create a sheet named '{self.base_case_parameter}' or specify a different "
-                f"base_case parameter when initializing TornadoProcessor."
+                f"base_case parameter when initializing Dataset."
             )
         return self.case_manager.get_case(1, self.base_case_parameter)
     

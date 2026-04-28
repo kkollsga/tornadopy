@@ -7,7 +7,7 @@ generating professional tornado charts for uncertainty analysis.
 
 from typing import List
 
-from .processor import TornadoProcessor
+from .processor import Dataset
 from .plot import tornado_plot
 from .distribution import distribution_plot
 from .correlation import correlation_plot
@@ -20,4 +20,4 @@ except Exception:
     # Fallback for development installs
     __version__: str = "0.0.0.dev"
 
-__all__: List[str] = ["TornadoProcessor", "tornado_plot", "distribution_plot", "correlation_plot"]
+__all__: List[str] = ["Dataset", "tornado_plot", "distribution_plot", "correlation_plot"]
