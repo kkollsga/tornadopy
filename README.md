@@ -99,13 +99,15 @@ ds.list_filters()        # ['north', 'south']
 ds.get_filter("north")   # {'zone': [...]}
 
 # Active filter — applied to every plot/compute call that doesn't pass `filters=`
-ds.filter({"contact_regions": ["cerisa main"]})   # set
+# `filter()` is chainable: it sets and returns the dataset.
+ds.filter({"contact_regions": ["cerisa main"]})   # set inline
 ds.filter("north")                                # set from a stored preset
-ds.filter()                                       # get current
 ds.filter(None)                                   # clear
+ds.active_filter                                  # read current
 
-tornado_plot(ds, property="stoiip")               # uses the active filter
-tornado_plot(ds, property="stoiip", filters="south")  # explicit override
+tornado_plot(ds, property="stoiip")                              # uses the active filter
+tornado_plot(ds, property="stoiip", filters="south")             # explicit override
+distribution_plot(ds.filter({"zone": "x"}), property="stoiip")   # one-liner chain
 ```
 
 ## Default parameter

@@ -8,9 +8,6 @@ import polars as pl
 from fastexcel import read_excel
 
 
-_NO_ARG = object()  # Sentinel for distinguishing "no argument" from "None"
-
-
 # ================================================================
 # UNIT & DISPLAY FORMATTING MANAGER
 # ================================================================
@@ -3995,28 +3992,32 @@ class Dataset:
     # PUBLIC API - FILTER & CACHE MANAGEMENT
     # ================================================================
     
+    @property
+    def active_filter(self) -> Optional[Dict[str, Any]]:
+        """The currently active filter dict (or None)."""
+        return self._active_filter
+
     def filter(
         self,
-        filters: Union[Dict[str, Any], str, None] = _NO_ARG,
-    ) -> Optional[Dict[str, Any]]:
-        """Get/set the dataset's active filter.
+        filters: Union[Dict[str, Any], str, None],
+    ) -> "Dataset":
+        """Set the dataset's active filter and return ``self`` for chaining.
 
         Subsequent plot/compute calls that don't pass an explicit ``filters``
         argument use this filter automatically.
 
         Examples:
-            >>> ds.filter({"contact_regions": ["cerisa main"]})  # set
-            >>> ds.filter("north")                               # set from preset
-            >>> ds.filter()                                      # get current
-            >>> ds.filter(None)                                  # clear
+            >>> ds.filter({"contact_regions": ["cerisa main"]})       # set
+            >>> ds.filter("north")                                     # from preset
+            >>> ds.filter(None)                                        # clear
+            >>> distribution_plot(ds.filter({"zone": "x"}), property="stoiip")
+            >>> ds.active_filter                                       # inspect
         """
-        if filters is _NO_ARG:
-            return self._active_filter
         if filters is None:
             self._active_filter = None
-            return None
-        self._active_filter = self.filter_manager.resolve_filter_preset(filters)
-        return self._active_filter
+        else:
+            self._active_filter = self.filter_manager.resolve_filter_preset(filters)
+        return self
 
     def set_filter(self, name: str, filters: Dict[str, Any]) -> None:
         """Store a named filter preset."""
