@@ -1,10 +1,10 @@
 """
 Correlation Matrix Visualization Module
 
-This module provides functionality to visualize correlation matrices from
-TornadoPy's correlation_grid() function results.
+Renders Pearson correlation heatmaps for variables vs. volumetric properties.
 """
 
+import warnings
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union, TYPE_CHECKING
 
@@ -13,87 +13,65 @@ import matplotlib.patheffects as patheffects
 from matplotlib.colors import LinearSegmentedColormap
 import numpy as np
 
+from .processor import TornadoProcessor
+
 if TYPE_CHECKING:
     from matplotlib.figure import Figure
     from matplotlib.axes import Axes
 
 
 def correlation_plot(
-    correlation_data: Dict[str, Any],
+    ds: TornadoProcessor,
+    *,
+    parameter: Optional[str] = None,
+    filters: Union[Dict[str, Any], str, None] = None,
+    variables: Optional[List[str]] = None,
+    multiplier: Optional[float] = None,
+    decimals: int = 2,
     outfile: Optional[Union[str, Path]] = None,
     figsize: Optional[Tuple[float, float]] = None,
-    settings: Optional[Dict[str, Any]] = None
+    settings: Optional[Dict[str, Any]] = None,
 ) -> Tuple["Figure", "Axes", bool]:
     """
-    Create a beautiful correlation matrix heatmap.
+    Render a Pearson correlation matrix heatmap from a TornadoProcessor dataset.
 
-    Parameters
-    ----------
-    correlation_data : dict
-        Dictionary returned by TornadoProcessor.correlation_grid() containing:
-        - 'parameter': str, title for the plot
-        - 'matrix': np.ndarray, correlation matrix values
-        - 'variables': list, y-axis labels (input variables)
-        - 'properties': list, x-axis labels (output properties with units)
-        - 'n_cases': int, number of cases analyzed
-        - 'filter_name': str, filter name (optional)
-        - 'constant_variables': list of tuples (optional)
-        - 'skipped_variables': list (optional)
-
-    outfile : str or Path, optional
-        Path to save the figure. Supports formats: .png, .svg, .pdf, .jpg
-
-    figsize : tuple, optional
-        Figure size as (width, height) tuple (default: (12, 8))
-
-    settings : dict, optional
-        Dictionary to override default visual settings. Available keys:
-        - figsize: tuple, figure dimensions (default: (12, 8))
-        - dpi: int, resolution (default: 160)
-        - title_fontsize: int (default: 15)
-        - subtitle_fontsize: int (default: 10)
-        - xlabel_fontsize: int (default: 9)
-        - ylabel_fontsize: int (default: 9)
-        - tick_fontsize: int (default: 8)
-        - colorbar_fontsize: int (default: 9)
-        - value_fontsize: int (default: 7)
-        - figure_bg_color: str (default: "white")
-        - plot_bg_color: str (default: "white")
-        - text_color: str (default: "#1C2833")
-        - grid_color: str (default: "#D5D8DC")
-        - grid_linewidth: float (default: 0.5)
-        - cmap_colors: list (default: ["#2E5BFF", "white", "#E74C3C"])
-        - show_values: bool, display correlation values on cells (default: True)
-        - value_threshold: float, min abs value to show (default: 0.0)
-        - cell_aspect: str, 'auto' or 'equal' (default: 'auto')
-        - colorbar_label: str (default: "Correlation Coefficient")
-        - vmin: float, minimum correlation value (default: -1)
-        - vmax: float, maximum correlation value (default: 1)
-
-    Returns
-    -------
-    fig : matplotlib.figure.Figure
-        The figure object containing the plot
-    ax : matplotlib.axes.Axes
-        The axes object containing the heatmap
-    saved : bool
-        True if figure was saved to file, False otherwise
-
-    Examples
-    --------
-    >>> from tornadopy import TornadoProcessor, correlation_plot
-    >>> processor = TornadoProcessor("data.xlsx")
-    >>> corr_data = processor.correlation_grid(parameter="Full_Uncertainty")
-    >>> fig, ax, saved = correlation_plot(corr_data, outfile="correlation.png")
-
-    >>> # Customize appearance
-    >>> custom_settings = {
-    ...     "figsize": (14, 10),
-    ...     "show_values": False,
-    ...     "cmap_colors": ["blue", "white", "red"]
-    ... }
-    >>> fig, ax, saved = correlation_plot(corr_data, settings=custom_settings)
+    Args:
+        ds: TornadoProcessor dataset.
+        parameter: Sheet name. Defaults to the first sheet — a warning is printed
+                   when defaulted.
+        filters: Spatial filter dict ({field: value(s)}) or stored-filter name.
+                 Must not contain a 'property' key. Filters apply to property
+                 extraction only — variables come straight from the raw data.
+        variables: List of variable names (with or without $ prefix). Falls back
+                   to ``ds.default_variables`` if set.
+        multiplier: Optional display multiplier override for properties.
+        decimals: Decimals for correlation coefficients (default 2).
+        outfile, figsize, settings: Plot styling — same as before.
     """
+    if not isinstance(ds, TornadoProcessor):
+        raise TypeError(
+            "correlation_plot expects a TornadoProcessor as first argument. "
+            f"Got {type(ds).__name__}."
+        )
+
+    if parameter is None:
+        params = ds.parameters()
+        if not params:
+            raise ValueError("Dataset has no parameters.")
+        parameter = params[0]
+        warnings.warn(
+            f"correlation_plot: 'parameter' not specified — defaulting to '{parameter}'. "
+            f"Available parameters: {params}",
+            stacklevel=2,
+        )
+
+    correlation_data = ds._correlation_data(
+        parameter=parameter,
+        filters=filters,
+        variables=variables,
+        multiplier=multiplier,
+        decimals=decimals,
+    )
 
     # Default settings dictionary
     s = {

@@ -157,57 +157,65 @@ class UnitManager:
 # ================================================================
 
 class FilterManager:
-    """Manages filter presets and resolution."""
-    
+    """Manages filter presets and resolution.
+
+    Filters describe spatial/segment selection only. The 'property' is
+    always passed separately to plot/compute calls — it is not allowed
+    inside a filter dict.
+    """
+
+    RESERVED_FILTER_KEYS = {'property'}
+
     def __init__(self):
         self.stored_filters: Dict[str, Dict[str, Any]] = {}
-    
+
     @staticmethod
-    def normalize_property_for_matching(property_name: str) -> str:
-        """Normalize property name for matching."""
-        return property_name.lower().replace('(', '').replace(')', '').replace(' ', '-')
-    
+    def _validate_filter_dict(name: str, filters: Dict[str, Any]) -> None:
+        if not isinstance(filters, dict):
+            raise TypeError(
+                f"Filter '{name}' must be a dict mapping field names to values, "
+                f"got {type(filters).__name__}."
+            )
+        bad = FilterManager.RESERVED_FILTER_KEYS & set(filters.keys())
+        if bad:
+            raise ValueError(
+                f"Filter '{name}' contains reserved key(s) {sorted(bad)}. "
+                "The 'property' is set on the plot/compute call, not inside filters."
+            )
+
     def resolve_filter_preset(
-        self, 
-        filters: Union[Dict[str, Any], str],
-        available_properties: List[str] = None
+        self,
+        filters: Union[Dict[str, Any], str, None],
     ) -> Dict[str, Any]:
-        """Resolve filter preset if string, otherwise return dict as-is."""
+        """Resolve a filter preset name to its dict, or return the dict unchanged."""
+        if filters is None:
+            return {}
         if isinstance(filters, str):
-            if '_' in filters:
-                parts = filters.rsplit('_', 1)
-                if len(parts) == 2:
-                    base_filter_name, property_part = parts
-                    
-                    if (base_filter_name in self.stored_filters and 
-                        property_part not in self.stored_filters):
-                        
-                        normalized_input = self.normalize_property_for_matching(property_part)
-                        matched_property = property_part.replace('-', ' ')
-                        
-                        if available_properties:
-                            for prop in available_properties:
-                                normalized_prop = self.normalize_property_for_matching(prop)
-                                if normalized_prop == normalized_input:
-                                    matched_property = prop
-                                    break
-                        
-                        base_filters = self.stored_filters[base_filter_name].copy()
-                        base_filters['property'] = matched_property
-                        return base_filters
-            
-            return self.get_filter(filters)
-        
-        return filters if filters is not None else {}
-    
+            return dict(self.get_filter(filters))
+        if isinstance(filters, dict):
+            self._validate_filter_dict('<inline>', filters)
+            return dict(filters)
+        raise TypeError(
+            f"filters must be a dict, a stored-filter name, or None — got {type(filters).__name__}."
+        )
+
     def set_filter(self, name: str, filters: Dict[str, Any]) -> None:
         """Store a named filter preset for reuse."""
-        self.stored_filters[name] = filters
-    
+        self._validate_filter_dict(name, filters)
+        self.stored_filters[name] = dict(filters)
+
     def set_filters(self, filters_dict: Dict[str, Dict[str, Any]]) -> None:
         """Store multiple named filter presets at once."""
-        self.stored_filters.update(filters_dict)
-    
+        if not isinstance(filters_dict, dict):
+            raise TypeError(
+                f"set_filters expects a dict of {{name: filter_dict}}, "
+                f"got {type(filters_dict).__name__}."
+            )
+        for name, f in filters_dict.items():
+            self._validate_filter_dict(name, f)
+        for name, f in filters_dict.items():
+            self.stored_filters[name] = dict(f)
+
     def get_filter(self, name: str) -> Dict[str, Any]:
         """Retrieve a stored filter preset."""
         if name not in self.stored_filters:
@@ -216,27 +224,26 @@ class FilterManager:
                 f"Available: {list(self.stored_filters.keys())}"
             )
         return self.stored_filters[name]
-    
+
     def list_filters(self) -> List[str]:
         """List all stored filter preset names."""
         return list(self.stored_filters.keys())
-    
+
     @staticmethod
     def merge_property_filter(
-        filters: Dict[str, Any], 
+        filters: Dict[str, Any],
         property: Union[str, List[str], bool, None]
     ) -> Dict[str, Any]:
-        """Merge property parameter with filters dict."""
+        """Merge property kwarg into filters dict for internal extraction calls."""
         merged = dict(filters) if filters else {}
-        
+
         if property is None:
             return merged
-        elif property is False:
+        if property is False:
             merged.pop('property', None)
             return merged
-        else:
-            merged['property'] = property
-            return merged
+        merged['property'] = property
+        return merged
 
 
 # ================================================================
@@ -3147,6 +3154,48 @@ class TornadoProcessor:
         resolved = self._resolve_parameter(parameter)
         return self.info.get(resolved, {})
 
+    def show_filters(self, parameter: str = None) -> Dict[str, List[Any]]:
+        """Return the available filter fields for a parameter and their unique values.
+
+        Args:
+            parameter: Parameter (sheet) name. Defaults to the first non-base-case sheet.
+
+        Returns:
+            Dict mapping each dynamic field name to its sorted list of unique values,
+            e.g. ``{'zone': ['cerisa main', 'cerisa flank'], 'contact_segment': [...]}``.
+        """
+        resolved = self._resolve_parameter(parameter)
+        out: Dict[str, List[Any]] = {}
+        for field in self.dynamic_fields.get(resolved, []):
+            try:
+                out[field] = self.unique_values(field, parameter=resolved)
+            except ValueError:
+                out[field] = []
+        return out
+
+    def show_parameters(self) -> Dict[str, Dict[str, Any]]:
+        """Return a dict describing each parameter (sheet) in the dataset.
+
+        Each entry contains:
+            - ``n_cases``: number of cases (rows) in the sheet
+            - ``properties``: list of property names available
+            - ``filters``: dict of dynamic filter fields → unique values
+            - ``is_base_case``: True if this is the base-case sheet
+        """
+        result: Dict[str, Dict[str, Any]] = {}
+        for name in self.data.keys():
+            try:
+                props = self.properties(name)
+            except ValueError:
+                props = []
+            result[name] = {
+                'n_cases': len(self.data[name]) if name in self.data else 0,
+                'properties': props,
+                'filters': self.show_filters(name),
+                'is_base_case': name == self.base_case_parameter,
+            }
+        return result
+
     def describe(self, parameter: str = None, max_values: int = 20) -> None:
         """Print a quick overview of properties, dynamic fields, filter values,
         stored filter presets and usage examples — everything needed to set up
@@ -3449,51 +3498,6 @@ class TornadoProcessor:
     # PUBLIC API - STATISTICS COMPUTATION
     # ================================================================
 
-    def _auto_detect_property(
-        self,
-        filters: Union[Dict[str, Any], str],
-        property: Union[str, List[str], bool, None]
-    ) -> Tuple[Union[Dict[str, Any], str, None], Union[str, List[str], bool, None]]:
-        """Auto-detect if filters argument is actually a property name.
-
-        Returns:
-            Tuple of (filters, property) with corrected values
-        """
-        # Only auto-detect if filters is a string and property is not explicitly set
-        if not isinstance(filters, str) or property is not None:
-            return filters, property
-
-        # Check if it's NOT a stored filter
-        if filters in self.filter_manager.stored_filters:
-            return filters, property
-
-        # Check if it contains underscore (filter_property pattern)
-        if '_' in filters:
-            return filters, property
-
-        # Likely a property name - check against known properties or available columns
-        is_property = False
-
-        # Check if it's in known unit manager properties
-        normalized_name = filters.lower().strip()
-        if normalized_name in self.unit_manager.display_formats:
-            is_property = True
-
-        # Check if it's in available case properties
-        if not is_property and hasattr(self, 'cases') and len(self.cases) > 0:
-            sample_case = self.cases[0]
-            if hasattr(sample_case, '_properties'):
-                # Parse property name to handle units
-                prop_clean, _ = self.unit_manager.parse_property_unit(filters)
-                if prop_clean.lower() in [p.lower() for p in sample_case._properties.keys()]:
-                    is_property = True
-
-        # If it's a property, move it from filters to property parameter
-        if is_property:
-            return None, filters
-
-        return filters, property
-
     def compute(
         self,
         stats: Union[str, List[str]],
@@ -3505,16 +3509,18 @@ class TornadoProcessor:
         case_selection: bool = False,
         selection_criteria: Dict[str, Any] = None
     ) -> Union[Dict, Tuple[Dict, List[Case]]]:
-        """Compute statistics for a single parameter with filters."""
-        # Auto-detect if first argument is a property name
-        filters, property = self._auto_detect_property(filters, property)
+        """Compute statistics for a single parameter with filters.
 
+        Args:
+            stats: Stat name or list of stat names.
+            parameter: Sheet name (defaults to first sheet).
+            filters: Spatial filter dict ({field: value(s)}) or stored-filter name.
+                     Must not contain a 'property' key — pass property explicitly.
+            property: Property to compute on (e.g. 'stoiip'). Required for value stats.
+        """
         resolved = self._resolve_parameter(parameter)
 
-        filters = self.filter_manager.resolve_filter_preset(
-            filters,
-            self.properties(resolved)
-        )
+        filters = self.filter_manager.resolve_filter_preset(filters)
         filters = FilterManager.merge_property_filter(filters, property)
 
         options = options or {}
@@ -3627,10 +3633,11 @@ class TornadoProcessor:
         include_reference_case: bool = True,
         sort_by_range: bool = True
     ) -> Union[Dict, List[Dict], Tuple[List[Dict], List[Case]]]:
-        """Compute statistics for multiple parameters."""
-        # Auto-detect if first argument is a property name
-        filters, property = self._auto_detect_property(filters, property)
+        """Compute statistics for multiple parameters.
 
+        Filters must not contain a 'property' key — pass property explicitly via the
+        property kwarg.
+        """
         filters = self.filter_manager.resolve_filter_preset(filters)
         filters = FilterManager.merge_property_filter(filters, property)
 
@@ -3800,7 +3807,7 @@ class TornadoProcessor:
     # PUBLIC API - CORRELATION GRID
     # ================================================================
     
-    def correlation_grid(
+    def _correlation_data(
         self,
         parameter: str = None,
         filters: Union[Dict[str, Any], str] = None,
@@ -3808,91 +3815,21 @@ class TornadoProcessor:
         multiplier: float = None,
         decimals: int = 2
     ) -> Dict[str, Any]:
-        """Generate Pearson correlation matrix for correlation plots.
-        
-        Computes correlations between variables (y-axis) and volumetric properties (x-axis).
-        Properties are ordered logically based on Case.parameters() calculation sequence.
-        
-        Pearson correlation coefficient ranges from -1 to +1:
-        - +1.0 = perfect positive correlation (variable ↑ → property ↑)
-        - -1.0 = perfect negative correlation (variable ↑ → property ↓)
-        -  0.0 = no linear correlation
-        
-        Args:
-            parameter: Tornado parameter name (defaults to first parameter).
-                      REQUIRED: Must specify which parameter to analyze.
-            filters: Optional filters to apply ONLY to property extraction (NOT to variables).
-                    Variables always come directly from the raw data.
-                    Can be a filter name string or dict.
-                    Note: 'property' key in filters is ignored - all volumetric properties are used.
-            variables: List of variable names to use (with or without $ prefix).
-                      Defaults to self.default_variables if set.
-                      REQUIRED if default_variables is not set.
-            multiplier: Optional display multiplier override for properties (e.g., 1e-6 for mcm)
-            decimals: Number of decimal places for correlation coefficients (default: 2)
-        
-        Returns:
-            Dictionary with:
-                - 'parameter': Parameter name (for plot title)
-                - 'matrix': 2D numpy array of correlation coefficients (rows=variables, cols=properties)
-                - 'variables': List of variable names (y-axis labels) - includes constant variables
-                - 'properties': List of property names with units (x-axis labels)
-                - 'n_cases': Number of cases used in correlation calculation
-                - 'filter_name': Filter name extracted from filter string (if present)
-                - 'variable_ranges': List of (min, max) tuples for each variable
-                - 'constant_variables': List of (variable, value) tuples for zero-variance variables (None if none found)
-                - 'skipped_variables': List of (variable, reason) tuples for non-numeric variables (None if all included)
-        
-        Raises:
-            ValueError: If no variables are available (neither passed nor in default_variables)
-            ValueError: If no volumetric properties could be extracted
-            ValueError: If no numeric variables could be found (all variables are strings)
-        
-        Note:
-            - Only numeric variables are included. String variables are automatically skipped.
-            - Constant variables (zero variance) are INCLUDED but their correlations are set to 0.0.
-              This is important for QC - knowing a variable doesn't vary is valuable information.
-            - Warnings about division by zero are suppressed for constant variables.
-        """
-        # Resolve parameter
+        """Internal: build correlation grid data for correlation_plot()."""
         resolved = self._resolve_parameter(parameter)
-        
-        # Resolve variables
+
         if variables is None:
             if self.default_variables is None:
                 raise ValueError(
-                    "No variables specified. Either pass 'variables' parameter or "
-                    "set default_variables on the processor."
+                    "No variables specified. Pass 'variables' to correlation_plot."
                 )
             variables = self.default_variables
-        
-        # Normalize variable names (strip $ prefix)
+
         variables_normalized = [v.lstrip('$') for v in variables]
 
-        # Extract filter name before resolving filters
-        filter_name = None
-        original_filter_str = filters if isinstance(filters, str) else None
-        if original_filter_str:
-            if '_' in original_filter_str:
-                parts = original_filter_str.rsplit('_', 1)
-                if len(parts) == 2:
-                    base_filter_name, _ = parts
-                    if base_filter_name in self.filter_manager.stored_filters:
-                        filter_name = base_filter_name
-            elif original_filter_str in self.filter_manager.stored_filters:
-                filter_name = original_filter_str
+        filter_name = filters if isinstance(filters, str) else None
+        filters = self.filter_manager.resolve_filter_preset(filters)
 
-        # Resolve filters
-        if filters is not None:
-            filters = self.filter_manager.resolve_filter_preset(filters)
-        else:
-            filters = {}
-
-        # Check for "name" key in resolved filters (overrides extracted name)
-        if isinstance(filters, dict) and 'name' in filters:
-            filter_name = filters['name']
-
-        # Delegate to StatisticsComputer
         result = self.statistics_computer.compute_correlation_grid(
             parameter=resolved,
             variables=variables_normalized,
@@ -3901,20 +3838,19 @@ class TornadoProcessor:
             decimals=decimals
         )
 
-        # Add filter_name to result if present
         if filter_name:
             result['filter_name'] = filter_name
 
         return result
     
     # ================================================================
-    # PUBLIC API - CONVENIENCE METHODS
+    # INTERNAL API - DATA EXTRACTION FOR PLOT FUNCTIONS
     # ================================================================
-    
-    def tornado(
+
+    def _tornado_data(
         self,
-        filters: Union[Dict[str, Any], str] = None,
-        property: Union[str, List[str], bool, None] = None,
+        property: Union[str, List[str]],
+        filters: Union[Dict[str, Any], str, None] = None,
         multiplier: float = None,
         skip: Union[str, List[str]] = None,
         options: Dict[str, Any] = None,
@@ -3922,9 +3858,12 @@ class TornadoProcessor:
         selection_criteria: Dict[str, Any] = None,
         include_base_case: bool = True,
         include_reference_case: bool = True,
-        sort_by_range: bool = True
+        sort_by_range: bool = True,
     ) -> Union[Dict, List[Dict], Tuple[List[Dict], List[Case]]]:
-        """Compute tornado chart statistics."""
+        """Internal: build tornado section data for tornado_plot()."""
+        if property is None:
+            raise ValueError("tornado_plot requires 'property'.")
+
         merged_options = options.copy() if options else {}
 
         if skip is not None:
@@ -3934,53 +3873,18 @@ class TornadoProcessor:
                 existing_skip = [existing_skip]
             merged_options['skip'] = list(set(existing_skip + skip_list))
 
-        # Auto-detect if first argument is a property name
-        filters, property = self._auto_detect_property(filters, property)
+        filter_name = filters if isinstance(filters, str) else None
+        property_name = property if isinstance(property, str) else (
+            property[0] if isinstance(property, list) and property else None
+        )
 
-        # Extract filter name and property for tornado plot metadata
-        filter_name = None
-        property_name = None
-        original_filter_str = filters if isinstance(filters, str) else None
-        if original_filter_str:
-            if '_' in original_filter_str:
-                parts = original_filter_str.rsplit('_', 1)
-                if len(parts) == 2:
-                    base_filter_name, prop_part = parts
-                    if base_filter_name in self.filter_manager.stored_filters:
-                        filter_name = base_filter_name
-                        property_name = prop_part.replace('-', ' ')
-            elif original_filter_str in self.filter_manager.stored_filters:
-                filter_name = original_filter_str
-
-        # Resolve filters to extract property and name
-        resolved_filters = self.filter_manager.resolve_filter_preset(filters)
-        resolved_filters = FilterManager.merge_property_filter(resolved_filters, property)
-
-        # Check for "name" key in resolved filters (overrides extracted name)
-        if isinstance(resolved_filters, dict) and 'name' in resolved_filters:
-            filter_name = resolved_filters['name']
-
-        # Extract property if not already extracted from string
-        if property_name is None:
-            if resolved_filters and 'property' in resolved_filters:
-                prop_filter = resolved_filters['property']
-                if isinstance(prop_filter, str):
-                    property_name = prop_filter
-                elif isinstance(prop_filter, list) and len(prop_filter) > 0:
-                    property_name = prop_filter[0]
-
-        # Get unit for property
-        unit = None
         if property_name:
             unit = self.unit_manager.get_display_unit(property_name)
-
-        # Store metadata in options to pass through
+            merged_options['property_name'] = property_name
+            if unit:
+                merged_options['unit'] = unit
         if filter_name:
             merged_options['filter_name'] = filter_name
-        if property_name:
-            merged_options['property_name'] = property_name
-        if unit:
-            merged_options['unit'] = unit
 
         return self.compute_batch(
             stats=['minmax', 'p90p10'],
@@ -3995,49 +3899,29 @@ class TornadoProcessor:
             include_reference_case=include_reference_case,
             sort_by_range=sort_by_range
         )
-    
-    def distribution(
+
+    def _distribution_data(
         self,
-        parameter: str = None,
-        filters: Union[Dict[str, Any], str] = None,
-        property: Union[str, List[str], bool, None] = None,
+        parameter: str,
+        property: Union[str, List[str]],
+        filters: Union[Dict[str, Any], str, None] = None,
         multiplier: float = None,
         options: Dict[str, Any] = None
     ) -> Union[Dict[str, Any], Dict[str, Dict[str, Any]]]:
-        """Get full distribution of values with metadata.
+        """Internal: build distribution data dict for distribution_plot()."""
+        if property is None:
+            raise ValueError("distribution_plot requires 'property'.")
 
-        Returns:
-            For single property: Dict with keys:
-                - 'data': np.ndarray of distribution values
-                - 'title': str title for the distribution (format: "{parameter} distribution", underscores replaced with spaces)
-                - 'property': str property name
-                - 'unit': str unit string (e.g., 'mcm', 'bcm')
-                - 'parameter': str tornado parameter name (original with underscores)
-                - 'filter_name': str filter name if extracted from filter preset
-            For multiple properties: Dict mapping property names to the above dict structure
-        """
-        # Auto-detect if first argument is a property name
-        filters, property = self._auto_detect_property(filters, property)
-
-        # Store original filter string before resolution
-        original_filter_str = filters if isinstance(filters, str) else None
-
-        # Resolve parameter
+        filter_name = filters if isinstance(filters, str) else None
         resolved_parameter = self._resolve_parameter(parameter)
 
-        # Resolve filters early to extract metadata
-        resolved_filters = self.filter_manager.resolve_filter_preset(
-            filters,
-            self.properties(resolved_parameter)
+        resolved_filters = FilterManager.merge_property_filter(
+            self.filter_manager.resolve_filter_preset(filters), property
         )
-        resolved_filters = FilterManager.merge_property_filter(resolved_filters, property)
-
-        # NEW: Validate property is required for distribution
-        DataExtractor.validate_property_required(resolved_filters, 'distribution')
 
         compute_result = self.compute(
             stats="distribution",
-            parameter=parameter,
+            parameter=resolved_parameter,
             filters=filters,
             property=property,
             multiplier=multiplier,
@@ -4053,70 +3937,40 @@ class TornadoProcessor:
             errors = result_dict.get("errors", [])
             if errors:
                 raise ValueError(
-                    "distribution() failed to produce data. Underlying error(s):\n  - "
+                    "distribution_plot failed to produce data. Underlying error(s):\n  - "
                     + "\n  - ".join(str(e) for e in errors)
                 )
             raise ValueError(
-                "distribution() returned no data and no error was captured. "
+                "distribution_plot returned no data and no error was captured. "
                 "Check that filters match existing columns "
-                "(use processor.describe() to inspect available fields/values)."
+                "(use ds.describe() to inspect available fields/values)."
             )
 
         distribution_data = result_dict["distribution"]
 
-        # If multiple properties, return dict of dicts
         if isinstance(distribution_data, dict):
-            result = {}
-            for prop_name, prop_data in distribution_data.items():
-                result[prop_name] = self._create_distribution_metadata(
-                    prop_data, prop_name, original_filter_str, resolved_filters, multiplier, resolved_parameter
+            return {
+                prop_name: self._create_distribution_metadata(
+                    prop_data, prop_name, filter_name, resolved_parameter
                 )
-            return result
+                for prop_name, prop_data in distribution_data.items()
+            }
 
-        # Single property - extract property name
         property_name = resolved_filters.get('property', 'Value')
-
         return self._create_distribution_metadata(
-            distribution_data, property_name, original_filter_str, resolved_filters, multiplier, resolved_parameter
+            distribution_data, property_name, filter_name, resolved_parameter
         )
 
     def _create_distribution_metadata(
         self,
         data: np.ndarray,
         property_name: str,
-        filter_str: str = None,
-        resolved_filters: Dict[str, Any] = None,
-        _multiplier: float = None,
+        filter_name: str = None,
         parameter: str = None
     ) -> Dict[str, Any]:
         """Create distribution metadata dict."""
-        # Extract filter name if filter string provided
-        filter_name = None
-        if filter_str and isinstance(filter_str, str):
-            if '_' in filter_str:
-                parts = filter_str.rsplit('_', 1)
-                if len(parts) == 2:
-                    base_filter_name, _ = parts
-                    # Check if this looks like a filter_property pattern
-                    if base_filter_name in self.filter_manager.stored_filters:
-                        filter_name = base_filter_name
-            elif filter_str in self.filter_manager.stored_filters:
-                filter_name = filter_str
-
-        # Check for "name" key in resolved filters (overrides extracted name)
-        if isinstance(resolved_filters, dict) and 'name' in resolved_filters:
-            filter_name = resolved_filters['name']
-
-        # Get unit string
         unit = self.unit_manager.get_display_unit(property_name)
-
-        # Create title - format: "{parameter} distribution"
-        # Replace underscores with spaces in parameter name
-        if parameter:
-            parameter_display = parameter.replace('_', ' ')
-            title = f"{parameter_display} distribution"
-        else:
-            title = "Distribution"
+        title = f"{parameter.replace('_', ' ')} distribution" if parameter else "Distribution"
 
         return {
             'data': data,
@@ -4124,7 +3978,7 @@ class TornadoProcessor:
             'property': property_name,
             'unit': unit,
             'parameter': parameter,
-            'filter_name': filter_name
+            'filter_name': filter_name,
         }
     
     # ================================================================

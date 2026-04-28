@@ -142,3 +142,7 @@ Thumbs.db
 *.xlsx
 !examples/*.png
 !examples/*.xlsb
+
+# Local datasets — Petrel exports, raw extracts, scratch CSVs
+data/
+data.txt

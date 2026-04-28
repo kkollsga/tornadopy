@@ -1,3 +1,4 @@
+import warnings
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union, TYPE_CHECKING
 
@@ -5,13 +6,20 @@ import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.ticker import AutoMinorLocator, MultipleLocator
 
+from .processor import TornadoProcessor
+
 if TYPE_CHECKING:
     from matplotlib.figure import Figure
     from matplotlib.axes import Axes
 
 
 def distribution_plot(
-    data: Union[Dict[str, Any], np.ndarray, List[float]],
+    ds: TornadoProcessor,
+    *,
+    property: str,
+    parameter: Optional[str] = None,
+    filters: Union[Dict[str, Any], str, None] = None,
+    multiplier: Optional[float] = None,
     title: Optional[str] = None,
     unit: Optional[str] = None,
     outfile: Optional[Union[str, Path]] = None,
@@ -22,110 +30,59 @@ def distribution_plot(
     settings: Optional[Dict[str, Any]] = None,
     bin_number: Optional[int] = None,
     bin_start: Optional[float] = None,
-    bin_end: Optional[float] = None
+    bin_end: Optional[float] = None,
 ) -> Tuple["Figure", "Axes", Optional[str]]:
     """
-    Generate a distribution histogram with cumulative curve.
-
-    Features:
-    - P90/P50/P10 subtitle with percentile values
-    - Beautiful bin sizing with round numbers
-    - No gaps between bars
-    - Dark outline matching color scheme
-    - Cumulative curve (dark red) showing % of cases with higher value
-    - Secondary axis (right) for reading percentile values
-    - Optional percentile markers on cumulative line
-    - Optional reference case line
-    - Minor gridlines with transparency
-    - Manual gridline interval control
+    Distribution histogram (with cumulative curve) for one property of one parameter.
 
     Args:
-        data: Either:
-            - Dict with keys 'data', 'title', 'property', 'unit', 'parameter', 'filter_name' (from processor.distribution())
-            - Array-like data (numpy array, list, or pandas Series) for legacy support
-        title: Chart title (optional if data is dict with 'title' key, format: "{parameter} distribution")
-        unit: Unit label for x-axis and subtitle (optional if data is dict with 'unit' key)
-        outfile: Output file path (if specified, saves the figure)
-        target_bins: Target number of bins for histogram with beautiful edges (default 20)
-        color: Color scheme - "red", "blue", "green", "orange", "purple", "fuchsia", "yellow"
-        reference_case: Optional reference case value to plot as vertical line
-        figsize: Figure size as (width, height) tuple (default: (10, 6))
-        settings: Dictionary of visual settings to override defaults
-        bin_number: Manual number of bins (if specified, overrides target_bins and disables beautiful edges)
-        bin_start: Manual start of the histogram range (optional, can be used with bin_number or target_bins)
-        bin_end: Manual end of the histogram range (optional, can be used with bin_number or target_bins)
-
-    Returns:
-        Tuple of (fig, ax, saved):
-        - fig: Matplotlib figure object
-        - ax: Matplotlib axes object (primary)
-        - saved: Path to saved file (if outfile specified, otherwise None)
-
-    Example:
-        >>> from tornadopy import TornadoProcessor, distribution_plot
-        >>> processor = TornadoProcessor("data.xlsb")
-        >>> dist = processor.distribution(
-        ...     parameter="Parameter1",
-        ...     filters="Cerisa_STOIIP"
-        ... )
-        >>> # dist is now a dict with:
-        >>> # {'data': array([...]),
-        >>> #  'title': 'Parameter 1 distribution',
-        >>> #  'property': 'stoiip',
-        >>> #  'unit': 'bcm',
-        >>> #  'parameter': 'Parameter_1',
-        >>> #  'filter_name': 'Cerisa'}
-        >>>
-        >>> # Default: Beautiful bins with automatic range
-        >>> fig, ax, saved = distribution_plot(
-        ...     dist,
-        ...     outfile="distribution.png"
-        ... )
-        >>>
-        >>> # Manual bin number: exact number of bins (no beautiful edges)
-        >>> fig, ax, saved = distribution_plot(
-        ...     dist,
-        ...     bin_number=25,
-        ...     outfile="distribution.png"
-        ... )
-        >>>
-        >>> # Manual range with beautiful bins
-        >>> fig, ax, saved = distribution_plot(
-        ...     dist,
-        ...     bin_start=0,
-        ...     bin_end=1000,
-        ...     outfile="distribution.png"
-        ... )
-        >>>
-        >>> # Manual bin number with custom range
-        >>> fig, ax, saved = distribution_plot(
-        ...     dist,
-        ...     bin_number=30,
-        ...     bin_start=0,
-        ...     bin_end=1000,
-        ...     outfile="distribution.png"
-        ... )
-        >>> # Plot will show:
-        >>> # Title: "Parameter 1 distribution"  (underscores replaced with spaces)
-        >>> # Subtitle: "Cerisa  |  P90: 123.45   P50: 234.56   P10: 345.67 bcm"  (centered, unit only after P10)
-        >>> # X-axis: "STOIIP (bcm)"
+        ds: TornadoProcessor dataset.
+        property: Property to plot (e.g. 'stoiip').
+        parameter: Sheet name. Defaults to the first sheet — a warning is printed
+                   when defaulted.
+        filters: Spatial filter dict ({field: value(s)}) or stored-filter name.
+                 Must not contain a 'property' key.
+        multiplier: Optional display multiplier override.
+        title, unit, outfile, target_bins, color, reference_case, figsize,
+        settings, bin_number, bin_start, bin_end: Plot styling — same as before.
     """
-    # Handle new dict format from processor.distribution()
-    if isinstance(data, dict) and 'data' in data:
-        distribution_data = data['data']
-        if title is None:
-            title = data.get('title', 'Distribution')
-        if unit is None:
-            unit = data.get('unit', None)
-        property_name = data.get('property', 'Value')
-        filter_name = data.get('filter_name', None)
-    else:
-        # Legacy format: data is array-like
-        distribution_data = data
-        property_name = 'Value'
-        filter_name = None
-        if title is None:
-            title = "Distribution"
+    if not isinstance(ds, TornadoProcessor):
+        raise TypeError(
+            "distribution_plot expects a TornadoProcessor as first argument. "
+            f"Got {type(ds).__name__}."
+        )
+
+    if parameter is None:
+        params = ds.parameters()
+        if not params:
+            raise ValueError("Dataset has no parameters.")
+        parameter = params[0]
+        warnings.warn(
+            f"distribution_plot: 'parameter' not specified — defaulting to '{parameter}'. "
+            f"Available parameters: {params}",
+            stacklevel=2,
+        )
+
+    data = ds._distribution_data(
+        parameter=parameter,
+        property=property,
+        filters=filters,
+        multiplier=multiplier,
+    )
+
+    if isinstance(data, dict) and 'data' not in data:
+        raise ValueError(
+            "distribution_plot received multi-property data but expects a single "
+            "property — pass a single string for `property`."
+        )
+
+    distribution_data = data['data']
+    if title is None:
+        title = data.get('title', 'Distribution')
+    if unit is None:
+        unit = data.get('unit', None)
+    property_name = data.get('property', 'Value')
+    filter_name = data.get('filter_name', None)
     # --- Color schemes ---
     color_map = {
         "red": {"light": "#FB877A", "dark": "#BA2A19"},

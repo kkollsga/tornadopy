@@ -5,13 +5,21 @@ import matplotlib.pyplot as plt
 import matplotlib.patheffects as patheffects
 from matplotlib.ticker import AutoMinorLocator, FormatStrFormatter
 
+from .processor import TornadoProcessor
+
 if TYPE_CHECKING:
     from matplotlib.figure import Figure
     from matplotlib.axes import Axes
 
 
 def tornado_plot(
-    sections: List[Dict[str, Any]],
+    ds: TornadoProcessor,
+    *,
+    property: str,
+    filters: Union[Dict[str, Any], str, None] = None,
+    multiplier: Optional[float] = None,
+    case_selection: bool = False,
+    selection_criteria: Optional[Dict[str, Any]] = None,
     title: str = "Tornado Chart",
     subtitle: Optional[str] = None,
     outfile: Optional[Union[str, Path]] = None,
@@ -21,37 +29,45 @@ def tornado_plot(
     filter_name: Optional[str] = None,
     preferred_order: Optional[List[str]] = None,
     figsize: Optional[Tuple[float, float]] = None,
-    settings: Optional[Dict[str, Any]] = None
+    settings: Optional[Dict[str, Any]] = None,
 ) -> Tuple[Optional["Figure"], Optional["Axes"], Optional[str]]:
     """
-    Tornado chart with:
-    - inside/outside label control
-    - automatic white p10/p90 text (inside only)
-    - soft outline for white text
-    - shadows only for outer bars (not p90/p10 overlays)
-    - relative and percentage label modes
-    - uses 'parameter' instead of 'title' for bar labels
-    - expects 'p90p10' as [p90, p10] (low, high)
-    - automatic space checking for p10/p90 labels (prefers largest space)
-    - optional reference_case vertical line
-    - preferred_order: list of parameter names to show first (in that order)
-    - auto-detects base, reference_case, filter_name, property_name, and unit from sections
-    - subtitle format: "<filter name>  |  Base case: xx   Ref case: xx unit" (centered, unit after last value)
-    - x-axis label format: "PROPERTY (unit)" e.g., "STOIIP (mcm)"
+    Render a tornado chart from a TornadoProcessor dataset.
 
     Args:
-        sections: List of dicts with tornado data
-        title: Chart title (default: "Tornado Chart")
-        subtitle: Custom subtitle (optional, auto-generated if None)
-        outfile: Path to save figure (optional)
-        base: Base case value (auto-detected from sections if None)
-        reference_case: Reference case value for vertical line (optional)
-        unit: Unit string (auto-detected from sections if None)
-        filter_name: Filter name for subtitle (auto-detected from sections if None)
-        preferred_order: List of parameter names to show first (optional)
-        figsize: Figure size as (width, height) tuple (default: (10, 7))
-        settings: Dict of additional settings to override defaults
+        ds: TornadoProcessor dataset.
+        property: Property to plot (e.g. 'stoiip').
+        filters: Spatial filter dict ({field: value(s)}) or stored-filter name.
+                 Must not contain a 'property' key.
+        multiplier: Optional display multiplier override.
+        case_selection / selection_criteria: Forwarded to data extraction.
+        title, subtitle, outfile, base, reference_case, unit, filter_name,
+        preferred_order, figsize, settings: Plot styling — same as before.
+
+    Notes:
+    - Each parameter (sheet) becomes one bar; tornado is intrinsically multi-parameter.
+    - Subtitle format: "<filter name>  |  Base case: xx   Ref case: xx unit"
+    - X-axis label format: "PROPERTY (unit)" e.g. "STOIIP (mcm)"
     """
+    if not isinstance(ds, TornadoProcessor):
+        raise TypeError(
+            "tornado_plot expects a TornadoProcessor as first argument. "
+            f"Got {type(ds).__name__}."
+        )
+
+    sections = ds._tornado_data(
+        property=property,
+        filters=filters,
+        multiplier=multiplier,
+        case_selection=case_selection,
+        selection_criteria=selection_criteria,
+    )
+
+    if isinstance(sections, tuple):
+        sections, _ = sections
+    if isinstance(sections, dict):
+        sections = [sections]
+
     # Auto-detect base, reference_case, filter_name, property_name, and unit from sections
     auto_base = None
     auto_reference = None
