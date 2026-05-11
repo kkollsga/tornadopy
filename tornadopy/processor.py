@@ -3681,7 +3681,11 @@ class Dataset:
         results = []
         all_selected_cases = []
         
-        if self.base_case_parameter and (include_base_case or include_reference_case):
+        if (
+            self.base_case_parameter
+            and self.base_case_parameter in self.data
+            and (include_base_case or include_reference_case)
+        ):
             case_entry = {"parameter": self.base_case_parameter}
 
             # Add metadata if present in options

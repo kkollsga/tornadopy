@@ -219,7 +219,24 @@ def tornado_plot(
         })
 
     if not data:
-        return None, None, None
+        error_msgs = []
+        for sec in sections:
+            errs = sec.get("errors")
+            if errs:
+                param = sec.get("parameter", "<unknown>")
+                for err in errs:
+                    error_msgs.append(f"  - {param}: {err}")
+        if error_msgs:
+            raise ValueError(
+                "tornado_plot produced no bars — every parameter failed:\n"
+                + "\n".join(error_msgs)
+                + "\n\nUse ds.describe() to inspect available sheets, properties, "
+                "and filter fields."
+            )
+        raise ValueError(
+            "tornado_plot produced no bars (no minmax/p90p10 data in any section). "
+            "Use ds.describe() to inspect available sheets and properties."
+        )
 
     # --- Sort data by preferred order ---
     if preferred_order:
