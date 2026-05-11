@@ -3744,12 +3744,23 @@ class Dataset:
             
             results.append(case_entry)
         
+        # compute() validates filters and rejects the reserved 'property' key,
+        # so split it back out for the per-parameter call.
+        if filters:
+            inner_property = filters.get("property")
+            inner_filters = {k: v for k, v in filters.items() if k != "property"}
+            inner_filters = inner_filters or None
+        else:
+            inner_property = None
+            inner_filters = None
+
         for param in param_list:
             try:
                 compute_result = self.compute(
                     stats=stats,
                     parameter=param,
-                    filters=filters,
+                    filters=inner_filters,
+                    property=inner_property,
                     multiplier=multiplier,
                     options=options,
                     case_selection=case_selection,
