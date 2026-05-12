@@ -79,7 +79,7 @@ jobs:
         run: ls -lh dist/
 
       - name: Upload distribution as artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: python-package-distributions
           path: dist/
@@ -93,7 +93,7 @@ jobs:
       id-token: write  # Required for trusted publishing
     steps:
       - name: Download distributions
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: python-package-distributions
           path: dist/
