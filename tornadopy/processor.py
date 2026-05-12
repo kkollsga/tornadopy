@@ -528,29 +528,41 @@ class ExcelDataLoader:
         return property_units
     
     def normalize_data_values(
-        self, 
-        df: pl.DataFrame, 
-        metadata: pl.DataFrame, 
-        sheet_name: str
+        self,
+        df: pl.DataFrame,
+        metadata: pl.DataFrame,
+        sheet_name: str,
+        sheet_units: Optional[Dict[str, str]] = None,
     ) -> pl.DataFrame:
-        """Normalize volumetric values to base units (m³)."""
+        """Normalize volumetric values to base units (m³).
+
+        Uses ``sheet_units`` when provided so each sheet normalises against
+        its own source units. Falls back to the global ``property_units``
+        (the first sheet's) when not provided.
+        """
         if metadata.is_empty():
             return df
-        
+
+        units_map = (
+            sheet_units
+            if sheet_units is not None
+            else self.unit_manager.property_units
+        )
+
         for row in metadata.iter_rows(named=True):
             col_name = row['column_name']
             property_name = row['property']
-            
+
             if not self.unit_manager.is_volumetric_property(property_name):
                 continue
-            
+
             if col_name not in df.columns:
                 continue
-            
-            if property_name in self.unit_manager.property_units:
-                unit = self.unit_manager.property_units[property_name]
+
+            if property_name in units_map:
+                unit = units_map[property_name]
                 factor = self.unit_manager.get_normalization_factor(unit)
-                
+
                 if factor != 1.0:
                     try:
                         df = df.with_columns(
@@ -558,34 +570,39 @@ class ExcelDataLoader:
                         )
                     except Exception as e:
                         print(f"[!] Warning: Could not normalize column '{col_name}' in sheet '{sheet_name}': {e}")
-        
+
         return df
-    
+
     def normalize_qc_values(
         self,
         qc_values: Dict[str, float],
-        sheet_name: str
+        sheet_name: str,
+        sheet_units: Optional[Dict[str, str]] = None,
     ) -> Dict[str, float]:
         """Normalize QC values to base units (m³).
-        
+
         Args:
             qc_values: Dictionary of property -> QC value (in original units)
             sheet_name: Sheet name for error reporting
-            
-        Returns:
-            Dictionary of property -> normalized QC value (in base m³)
+            sheet_units: Per-sheet property→unit map. Falls back to the
+                global property_units when not provided.
         """
         normalized = {}
-        
+        units_map = (
+            sheet_units
+            if sheet_units is not None
+            else self.unit_manager.property_units
+        )
+
         for property_name, qc_value in qc_values.items():
             if not self.unit_manager.is_volumetric_property(property_name):
                 normalized[property_name] = qc_value
                 continue
-            
-            if property_name in self.unit_manager.property_units:
-                unit = self.unit_manager.property_units[property_name]
+
+            if property_name in units_map:
+                unit = units_map[property_name]
                 factor = self.unit_manager.get_normalization_factor(unit)
-                
+
                 if factor != 1.0:
                     try:
                         normalized[property_name] = float(qc_value) * factor
@@ -596,7 +613,7 @@ class ExcelDataLoader:
                     normalized[property_name] = qc_value
             else:
                 normalized[property_name] = qc_value
-        
+
         return normalized
     
     @staticmethod
@@ -2785,14 +2802,35 @@ class Dataset:
         
         # Extract base/reference cases if specified
         if base_case:
+            # Resolve the requested base-case name against actual sheet names
+            # with case-insensitive + space/underscore-equivalent matching.
+            resolved = self._resolve_base_case_name(base_case)
+            if resolved is None:
+                available = list(self.data.keys())
+                print(
+                    f"[!] Warning: Base case sheet '{base_case}' not found "
+                    f"(also tried case/space/underscore variants). "
+                    f"base_case() and ref_case() methods will not be available. "
+                    f"Available sheets: {available}"
+                )
+                self._loading_log.append(
+                    f"⚠ Base case sheet '{base_case}' not found in {available}"
+                )
+                return  # nothing more to do; methods will raise on use
+            if resolved != base_case:
+                self._loading_log.append(
+                    f"ℹ Base case requested as '{base_case}', resolved to '{resolved}'"
+                )
+            self.base_case_parameter = resolved
             try:
-                self.case_manager.extract_base_and_reference_cases(base_case)
-                self._loading_log.append(f"Base/reference cases extracted from '{base_case}'")
+                self.case_manager.extract_base_and_reference_cases(resolved)
+                self._loading_log.append(f"Base/reference cases extracted from '{resolved}'")
             except KeyError as e:
-                # Soft error - base case sheet doesn't exist
-                print(f"[!] Warning: Base case sheet '{base_case}' not found. "
+                # Shouldn't happen after _resolve_base_case_name confirmed presence,
+                # but keep the soft error path for safety.
+                print(f"[!] Warning: Base case sheet '{resolved}' not found. "
                       f"base_case() and ref_case() methods will not be available.")
-                self._loading_log.append(f"⚠ Base case sheet '{base_case}' not found")
+                self._loading_log.append(f"⚠ Base case sheet '{resolved}' not found")
             except Exception as e:
                 print(f"[!] Warning: Failed to extract base/reference cases from '{base_case}': {e}")
                 self._loading_log.append(f"⚠ Failed to extract base/reference cases: {str(e)}")
@@ -2903,21 +2941,35 @@ class Dataset:
                     first_sheet_name = sheet_name
                     self._loading_log.append(f"Primary sheet: '{sheet_name}'")
                 else:
-                    # Validate unit consistency
+                    # Note unit differences without rejecting the sheet — each
+                    # sheet normalises against its own source units below, so
+                    # cross-sheet mismatch is cosmetic (it only affects which
+                    # display unit ends up canonical for plots).
+                    mismatches = []
                     for prop, unit in sheet_units.items():
                         if prop in self.unit_manager.property_units:
                             if self.unit_manager.property_units[prop] != unit:
                                 stored_short = self.unit_manager.unit_shortnames.get(
-                                    self.unit_manager.property_units[prop], 
+                                    self.unit_manager.property_units[prop],
                                     self.unit_manager.property_units[prop]
                                 )
                                 current_short = self.unit_manager.unit_shortnames.get(unit, unit)
-                                raise ValueError(
-                                    f"Unit mismatch in sheet '{sheet_name}' for property '{prop}':\n"
-                                    f"  Sheet '{first_sheet_name}' uses: {stored_short}\n"
-                                    f"  Sheet '{sheet_name}' uses: {current_short}"
+                                mismatches.append(
+                                    f"{prop} ({current_short} vs {stored_short} in '{first_sheet_name}')"
                                 )
-                    
+                    if mismatches:
+                        print(
+                            f"[i] Sheet '{sheet_name}': source units differ from "
+                            f"'{first_sheet_name}' on {len(mismatches)} "
+                            f"propert{'y' if len(mismatches) == 1 else 'ies'}: "
+                            + ", ".join(mismatches)
+                            + " — normalised to m³ on load, no action needed."
+                        )
+                        self._loading_log.append(
+                            f"ℹ Sheet '{sheet_name}' has differing source units "
+                            f"(normalised to m³): {', '.join(mismatches)}"
+                        )
+
                     # Check structure consistency (soft warning, not fatal)
                     structure_errors = self.data_loader.compare_sheet_structures(
                         primary_structure,
@@ -2931,12 +2983,16 @@ class Dataset:
                             f"({', '.join(structure_info['dynamic_fields'])} vs "
                             f"{', '.join(primary_structure['dynamic_fields'])})"
                         )
-                
-                # Normalize data values
-                data = self.data_loader.normalize_data_values(data, metadata, sheet_name)
-                
+
+                # Normalize data values using this sheet's own source units
+                data = self.data_loader.normalize_data_values(
+                    data, metadata, sheet_name, sheet_units=sheet_units
+                )
+
                 # Normalize QC values to same units as data
-                qc_values_normalized = self.data_loader.normalize_qc_values(qc_values, sheet_name)
+                qc_values_normalized = self.data_loader.normalize_qc_values(
+                    qc_values, sheet_name, sheet_units=sheet_units
+                )
                 
                 # Validate QC against segments and get undefined volumes
                 qc_errors, undefined_volumes, qc_report = self.data_loader.validate_qc_data(
@@ -3042,6 +3098,34 @@ class Dataset:
         if parameter is None:
             return list(self.data.keys())[0]
         return parameter
+
+    def _resolve_base_case_name(self, name: str) -> Optional[str]:
+        """Find a loaded sheet matching ``name`` modulo case + space/underscore.
+
+        Examples: with ``name='Base_case'`` will match any of
+        ``Base_case``, ``base_case``, ``Base_Case``, ``BASE_CASE``,
+        ``Base case``, ``base case``, ``Base Case``. Returns the
+        actually-loaded sheet name, or ``None`` if no match exists.
+
+        If multiple sheets match (e.g. ``Base_case`` and ``Base Case``),
+        prefer an exact case-sensitive match; otherwise the first
+        encountered match wins.
+        """
+        if name in self.data:
+            return name
+
+        def _norm(s: str) -> str:
+            return str(s).lower().replace(' ', '_')
+
+        target = _norm(name)
+        matches = [sheet for sheet in self.data.keys() if _norm(sheet) == target]
+        if not matches:
+            return None
+        # Exact case-sensitive match wins if present, otherwise first match
+        for m in matches:
+            if m == name:
+                return m
+        return matches[0]
     
     @staticmethod
     def _create_cache_key(parameter: str, filters: Dict[str, Any], *args) -> str:
