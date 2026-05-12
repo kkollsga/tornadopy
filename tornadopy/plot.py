@@ -18,6 +18,7 @@ def tornado_plot(
     property: str,
     filters: Union[Dict[str, Any], str, None] = None,
     multiplier: Optional[float] = None,
+    skip: Union[str, List[str], None] = None,
     case_selection: bool = False,
     selection_criteria: Optional[Dict[str, Any]] = None,
     title: str = "Tornado Chart",
@@ -73,6 +74,7 @@ def tornado_plot(
         property=property,
         filters=filters,
         multiplier=multiplier,
+        skip=skip,
         case_selection=case_selection,
         selection_criteria=selection_criteria,
     )

@@ -3780,106 +3780,114 @@ class Dataset:
     def stats(
         self,
         property: Union[str, List[str], None] = None,
-        parameter: Optional[str] = None,
+        parameter: Union[str, List[str], None] = None,
         filters: Union[Dict[str, Any], str, None] = None,
     ) -> pl.DataFrame:
-        """Summary statistics per property: n, P90, P50, P10, mean, std.
+        """Summary statistics per (parameter, property): n, P90, P50, P10, mean, std.
 
-        Always returns a Polars DataFrame with one row per property.
-        Values are in each property's display unit (mcm/bcm/kcm). The
-        ``unit`` column carries the unit so cross-property comparison is
-        unambiguous. Percentiles follow the petroleum convention —
-        **P90 is the low value** (90% probability of exceeding), P10 is
-        the high value.
+        Always returns a Polars DataFrame with one row per
+        ``(parameter, property)`` combination. Values are in each
+        property's display unit (mcm/bcm/kcm); the ``unit`` column
+        carries that unit so cross-property comparison is unambiguous.
+        Percentiles follow the petroleum convention — **P90 is the low
+        value** (90% probability of exceeding), P10 is the high value.
 
         Args:
             property: One property name, a list of property names, or
-                ``None`` to summarise all volumetric properties in the
-                parameter sheet (the default).
-            parameter: Sheet to summarise. Defaults to the first sheet,
-                warning when more than one exists.
+                ``None`` to summarise all volumetric properties available
+                in each parameter sheet (the default).
+            parameter: One sheet name, a list of sheet names, or ``None``
+                to use every loaded sheet (excluding the base-case sheet).
             filters: Spatial filter dict or stored-preset name. Must not
                 contain a ``'property'`` key.
+
+        Combinations that fail (e.g. fewer cases than the p90p10
+        threshold) are silently dropped rather than aborting the table.
         """
-        # --- resolve parameter ---
+        # --- resolve parameter list ---
+        all_params = self.parameters()
+        if not all_params:
+            raise ValueError("Dataset has no parameters.")
+
         if parameter is None:
-            params = self.parameters()
-            if not params:
-                raise ValueError("Dataset has no parameters.")
-            parameter = params[0]
-            if len(params) > 1:
-                warnings.warn(
-                    f"stats: 'parameter' not specified — defaulting to "
-                    f"'{parameter}'. Other parameters: {params[1:]}. "
-                    f"Pass parameter=<name> to select another.",
-                    stacklevel=2,
-                )
-
-        # --- resolve property list ---
-        if property is None:
-            try:
-                all_props = self.properties(parameter)
-            except ValueError:
-                all_props = []
-            prop_list = [
-                p for p in all_props
-                if self.unit_manager.is_volumetric_property(p)
-            ]
-            if not prop_list:
-                raise ValueError(
-                    f"stats: no volumetric properties found in '{parameter}'. "
-                    f"Pass property=<name> explicitly."
-                )
-        elif isinstance(property, str):
-            prop_list = [property]
+            param_list = [
+                p for p in all_params if p != self.base_case_parameter
+            ] or all_params
+        elif isinstance(parameter, str):
+            param_list = [parameter]
         else:
-            prop_list = list(property)
+            param_list = list(parameter)
 
-        # --- compute each property ---
+        # --- compute each (param, prop) row ---
         rows: List[Dict[str, Any]] = []
         errors: List[str] = []
 
-        for prop in prop_list:
-            try:
-                result = self.compute(
-                    stats=['count', 'p90p10', 'median', 'mean', 'std'],
-                    parameter=parameter,
-                    filters=filters,
-                    property=prop,
-                )
-                if isinstance(result, tuple):
-                    result, _ = result
-            except Exception as e:
-                errors.append(f"{prop}: {e}")
+        for param in param_list:
+            if param not in self.data:
+                errors.append(f"{param}: parameter not in dataset")
                 continue
 
-            if 'count' not in result:
-                errs = result.get('errors', [])
-                errors.append(f"{prop}: " + "; ".join(str(e) for e in errs) if errs else f"{prop}: no data")
-                continue
+            # Resolve property list for this parameter
+            if property is None:
+                try:
+                    all_props = self.properties(param)
+                except ValueError:
+                    all_props = []
+                prop_list = [
+                    p for p in all_props
+                    if self.unit_manager.is_volumetric_property(p)
+                ]
+            elif isinstance(property, str):
+                prop_list = [property]
+            else:
+                prop_list = list(property)
 
-            # p90p10 returns [10th percentile, 90th percentile] = [low, high]
-            p90p10 = result.get('p90p10') or [None, None]
-            rows.append({
-                "property": prop,
-                "unit": self.unit_manager.get_display_unit(prop) or "",
-                "n": result.get('count'),
-                "p90": p90p10[0],
-                "p50": result.get('median'),
-                "p10": p90p10[1],
-                "mean": result.get('mean'),
-                "std": result.get('std'),
-            })
+            for prop in prop_list:
+                try:
+                    result = self.compute(
+                        stats=['count', 'p90p10', 'median', 'mean', 'std'],
+                        parameter=param,
+                        filters=filters,
+                        property=prop,
+                    )
+                    if isinstance(result, tuple):
+                        result, _ = result
+                except Exception as e:
+                    errors.append(f"{param}/{prop}: {e}")
+                    continue
+
+                if 'count' not in result:
+                    errs = result.get('errors', [])
+                    errors.append(
+                        f"{param}/{prop}: " + "; ".join(str(e) for e in errs)
+                        if errs else f"{param}/{prop}: no data"
+                    )
+                    continue
+
+                # p90p10 returns [10th percentile, 90th percentile] = [low, high]
+                p90p10 = result.get('p90p10') or [None, None]
+                rows.append({
+                    "parameter": param,
+                    "property": prop,
+                    "unit": self.unit_manager.get_display_unit(prop) or "",
+                    "n": result.get('count'),
+                    "p90": p90p10[0],
+                    "p50": result.get('median'),
+                    "p10": p90p10[1],
+                    "mean": result.get('mean'),
+                    "std": result.get('std'),
+                })
 
         if not rows:
             raise ValueError(
-                "stats: failed to compute for any property. Errors:\n  - "
-                + "\n  - ".join(errors)
+                "stats: failed to compute for any (parameter, property) "
+                "combination. Errors:\n  - " + "\n  - ".join(errors)
             )
 
         return pl.DataFrame(
             rows,
             schema={
+                "parameter": pl.Utf8,
                 "property": pl.Utf8,
                 "unit": pl.Utf8,
                 "n": pl.Int64,
@@ -4666,7 +4674,7 @@ class FilteredDataset:
     def stats(
         self,
         property: Union[str, List[str], None] = None,
-        parameter: Optional[str] = None,
+        parameter: Union[str, List[str], None] = None,
     ) -> pl.DataFrame:
         """Summary statistics under this view's filter (see :meth:`Dataset.stats`)."""
         return self._ds.stats(
