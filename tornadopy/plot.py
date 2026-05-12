@@ -5,7 +5,7 @@ import matplotlib.pyplot as plt
 import matplotlib.patheffects as patheffects
 from matplotlib.ticker import AutoMinorLocator, FormatStrFormatter
 
-from .processor import Dataset
+from .processor import Dataset, FilteredDataset
 
 if TYPE_CHECKING:
     from matplotlib.figure import Figure
@@ -13,7 +13,7 @@ if TYPE_CHECKING:
 
 
 def tornado_plot(
-    ds: Dataset,
+    ds: Union[Dataset, FilteredDataset],
     *,
     property: str,
     filters: Union[Dict[str, Any], str, None] = None,
@@ -49,10 +49,20 @@ def tornado_plot(
     - Subtitle format: "<filter name>  |  Base case: xx   Ref case: xx unit"
     - X-axis label format: "PROPERTY (unit)" e.g. "STOIIP (mcm)"
     """
+    if isinstance(ds, FilteredDataset):
+        if filters is not None:
+            raise ValueError(
+                "tornado_plot received both a FilteredDataset (which already "
+                "carries a filter) and a filters= argument. Pick one."
+            )
+        # Prefer preset name so the subtitle shows the label
+        filters = ds.title if ds.title is not None else ds.filters
+        ds = ds.dataset
+
     if not isinstance(ds, Dataset):
         raise TypeError(
-            "tornado_plot expects a Dataset as first argument. "
-            f"Got {type(ds).__name__}."
+            "tornado_plot expects a Dataset or FilteredDataset as first "
+            f"argument. Got {type(ds).__name__}."
         )
 
     sections = ds._tornado_data(

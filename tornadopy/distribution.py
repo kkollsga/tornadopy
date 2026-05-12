@@ -6,7 +6,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.ticker import AutoMinorLocator, MultipleLocator
 
-from .processor import Dataset
+from .processor import Dataset, FilteredDataset
 
 if TYPE_CHECKING:
     from matplotlib.figure import Figure
@@ -14,7 +14,7 @@ if TYPE_CHECKING:
 
 
 def distribution_plot(
-    ds: Dataset,
+    ds: Union[Dataset, FilteredDataset],
     *,
     property: str,
     parameter: Optional[str] = None,
@@ -46,10 +46,19 @@ def distribution_plot(
         title, unit, outfile, target_bins, color, reference_case, figsize,
         settings, bin_number, bin_start, bin_end: Plot styling — same as before.
     """
+    if isinstance(ds, FilteredDataset):
+        if filters is not None:
+            raise ValueError(
+                "distribution_plot received both a FilteredDataset (which "
+                "already carries a filter) and a filters= argument. Pick one."
+            )
+        filters = ds.title if ds.title is not None else ds.filters
+        ds = ds.dataset
+
     if not isinstance(ds, Dataset):
         raise TypeError(
-            "distribution_plot expects a Dataset as first argument. "
-            f"Got {type(ds).__name__}."
+            "distribution_plot expects a Dataset or FilteredDataset as first "
+            f"argument. Got {type(ds).__name__}."
         )
 
     if parameter is None:

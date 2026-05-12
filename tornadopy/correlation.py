@@ -13,7 +13,7 @@ import matplotlib.patheffects as patheffects
 from matplotlib.colors import LinearSegmentedColormap
 import numpy as np
 
-from .processor import Dataset
+from .processor import Dataset, FilteredDataset
 
 if TYPE_CHECKING:
     from matplotlib.figure import Figure
@@ -21,7 +21,7 @@ if TYPE_CHECKING:
 
 
 def correlation_plot(
-    ds: Dataset,
+    ds: Union[Dataset, FilteredDataset],
     *,
     parameter: Optional[str] = None,
     filters: Union[Dict[str, Any], str, None] = None,
@@ -48,10 +48,19 @@ def correlation_plot(
         decimals: Decimals for correlation coefficients (default 2).
         outfile, figsize, settings: Plot styling — same as before.
     """
+    if isinstance(ds, FilteredDataset):
+        if filters is not None:
+            raise ValueError(
+                "correlation_plot received both a FilteredDataset (which "
+                "already carries a filter) and a filters= argument. Pick one."
+            )
+        filters = ds.title if ds.title is not None else ds.filters
+        ds = ds.dataset
+
     if not isinstance(ds, Dataset):
         raise TypeError(
-            "correlation_plot expects a Dataset as first argument. "
-            f"Got {type(ds).__name__}."
+            "correlation_plot expects a Dataset or FilteredDataset as first "
+            f"argument. Got {type(ds).__name__}."
         )
 
     if parameter is None:

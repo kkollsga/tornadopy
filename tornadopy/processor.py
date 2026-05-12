@@ -1,4 +1,5 @@
 import re
+import warnings
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -3174,6 +3175,77 @@ class Dataset:
                 out[field] = []
         return out
 
+    def field_values(self, field: str) -> Optional[List[Any]]:
+        """Return the union of unique values for a dynamic field across all sheets.
+
+        Useful for building filter dicts. Returns ``None`` when no sheet has
+        the field at all (so callers can distinguish "field doesn't exist" from
+        "field exists but is empty").
+
+        Args:
+            field: Dynamic field name (e.g. ``"zones"``, ``"contact_regions"``).
+                Case- and punctuation-insensitive (normalized like Excel headers).
+        """
+        field_norm = ExcelDataLoader.normalize_fieldname(field)
+
+        seen: set = set()
+        found_anywhere = False
+        for parameter, fields in self.dynamic_fields.items():
+            if field_norm not in fields:
+                continue
+            meta = self.metadata.get(parameter)
+            if meta is None or meta.is_empty():
+                continue
+            if field_norm not in meta.columns:
+                continue
+            found_anywhere = True
+            vals = (
+                meta
+                .select(field_norm)
+                .filter(pl.col(field_norm).is_not_null())
+                .unique()
+                .to_series()
+                .to_list()
+            )
+            seen.update(vals)
+
+        if not found_anywhere:
+            return None
+        return sorted(seen, key=lambda v: (v is None, str(v)))
+
+    # --- Convenience accessors for common dynamic fields --------------------
+    # Return None when the field isn't present in any sheet.
+
+    @property
+    def zones(self) -> Optional[List[Any]]:
+        """Unique values of the ``zones`` field across all sheets, or None."""
+        return self.field_values("zones")
+
+    @property
+    def segments(self) -> Optional[List[Any]]:
+        """Unique values of the ``segments`` field across all sheets, or None."""
+        return self.field_values("segments")
+
+    @property
+    def facies(self) -> Optional[List[Any]]:
+        """Unique values of the ``facies`` field across all sheets, or None."""
+        return self.field_values("facies")
+
+    @property
+    def boundaries(self) -> Optional[List[Any]]:
+        """Unique values of the ``boundaries`` field across all sheets, or None."""
+        return self.field_values("boundaries")
+
+    @property
+    def hc_intervals(self) -> Optional[List[Any]]:
+        """Unique values of the ``hc_intervals`` field across all sheets, or None."""
+        return self.field_values("hc_intervals")
+
+    @property
+    def contact_regions(self) -> Optional[List[Any]]:
+        """Unique values of the ``contact_regions`` field across all sheets, or None."""
+        return self.field_values("contact_regions")
+
     def show_parameters(self) -> Dict[str, Dict[str, Any]]:
         """Return a dict describing each parameter (sheet) in the dataset.
 
@@ -4007,32 +4079,36 @@ class Dataset:
     # PUBLIC API - FILTER & CACHE MANAGEMENT
     # ================================================================
     
-    @property
-    def active_filter(self) -> Optional[Dict[str, Any]]:
-        """The currently active filter dict (or None)."""
-        return self._active_filter
-
     def filter(
         self,
         filters: Union[Dict[str, Any], str, None],
-    ) -> "Dataset":
-        """Set the dataset's active filter and return ``self`` for chaining.
+    ) -> "FilteredDataset":
+        """Return a non-mutating filtered view of this Dataset.
 
-        Subsequent plot/compute calls that don't pass an explicit ``filters``
-        argument use this filter automatically.
+        ``ds`` itself is not modified — the returned ``FilteredDataset`` carries
+        the filter (and, when ``filters`` is a preset name, that name as
+        ``.title``). The view can be inspected via ``.head()`` or passed
+        directly to plot functions.
 
         Examples:
-            >>> ds.filter({"contact_regions": ["cerisa main"]})       # set
-            >>> ds.filter("north")                                     # from preset
-            >>> ds.filter(None)                                        # clear
-            >>> distribution_plot(ds.filter({"zone": "x"}), property="stoiip")
-            >>> ds.active_filter                                       # inspect
+            >>> ds.filter("CMain").head(5)
+            >>> ds.filter("CMain").title                              # "CMain"
+            >>> distribution_plot(ds.filter("CMain"), property="stoiip")
+            >>> ds.filter(None)                                        # empty view
+            >>> ds.filter({"zones": ["levee"]})                        # inline filter
         """
         if filters is None:
-            self._active_filter = None
-        else:
-            self._active_filter = self.filter_manager.resolve_filter_preset(filters)
-        return self
+            return FilteredDataset(self, filters=None, filter_name=None)
+        if isinstance(filters, str):
+            resolved = dict(self.filter_manager.get_filter(filters))
+            return FilteredDataset(self, filters=resolved, filter_name=filters)
+        if isinstance(filters, dict):
+            FilterManager._validate_filter_dict('<inline>', filters)
+            return FilteredDataset(self, filters=dict(filters), filter_name=None)
+        raise TypeError(
+            f"filters must be a dict, a stored-filter name, or None — "
+            f"got {type(filters).__name__}."
+        )
 
     def set_filter(self, name: str, filters: Dict[str, Any]) -> None:
         """Store a named filter preset."""
@@ -4152,3 +4228,194 @@ class Dataset:
                 print(f"  {prop:.<30} {details['unit']:>6}")
             else:
                 print(f"  {prop:.<30} (raw m³)")
+
+
+# ================================================================
+# FILTERED DATASET VIEW
+# ================================================================
+
+class FilteredDataset:
+    """Lightweight, non-mutating view of a Dataset with a filter applied.
+
+    Created by :meth:`Dataset.filter`. Carries the resolved filter dict
+    and (when the filter came from a preset name) the preset name as
+    ``.title``. Plot functions accept a ``FilteredDataset`` wherever they
+    accept a ``Dataset`` and inherit the filter automatically.
+
+    The view does not copy any data — extraction happens on demand against
+    the underlying ``Dataset``.
+    """
+
+    def __init__(
+        self,
+        ds: "Dataset",
+        filters: Optional[Dict[str, Any]] = None,
+        filter_name: Optional[str] = None,
+    ):
+        self._ds = ds
+        # Spatial filters only — 'property' is supplied at extraction time
+        self._filters = dict(filters) if filters else None
+        self._filter_name = filter_name
+
+    @property
+    def dataset(self) -> "Dataset":
+        """The underlying Dataset (unfiltered)."""
+        return self._ds
+
+    @property
+    def title(self) -> Optional[str]:
+        """The preset name this view was created from, or None for an inline dict."""
+        return self._filter_name
+
+    @property
+    def filters(self) -> Optional[Dict[str, Any]]:
+        """The resolved filter dict applied by this view (or None)."""
+        return dict(self._filters) if self._filters else None
+
+    def filter(
+        self,
+        filters: Union[Dict[str, Any], str, None],
+    ) -> "FilteredDataset":
+        """Return a new view with the filter replaced (does not compose)."""
+        return self._ds.filter(filters)
+
+    def parameters(self) -> List[str]:
+        return self._ds.parameters()
+
+    def properties(self, parameter: str = None) -> List[str]:
+        return self._ds.properties(parameter)
+
+    def show_filters(self, parameter: str = None) -> Dict[str, List[Any]]:
+        return self._ds.show_filters(parameter)
+
+    def show_parameters(self) -> Dict[str, Dict[str, Any]]:
+        return self._ds.show_parameters()
+
+    def describe(self, parameter: str = None, max_values: int = 20) -> None:
+        return self._ds.describe(parameter=parameter, max_values=max_values)
+
+    def field_values(self, field: str) -> Optional[List[Any]]:
+        return self._ds.field_values(field)
+
+    @property
+    def zones(self) -> Optional[List[Any]]:
+        return self._ds.zones
+
+    @property
+    def segments(self) -> Optional[List[Any]]:
+        return self._ds.segments
+
+    @property
+    def facies(self) -> Optional[List[Any]]:
+        return self._ds.facies
+
+    @property
+    def boundaries(self) -> Optional[List[Any]]:
+        return self._ds.boundaries
+
+    @property
+    def hc_intervals(self) -> Optional[List[Any]]:
+        return self._ds.hc_intervals
+
+    @property
+    def contact_regions(self) -> Optional[List[Any]]:
+        return self._ds.contact_regions
+
+    def head(
+        self,
+        n: int = 5,
+        parameter: Optional[str] = None,
+        properties: Optional[List[str]] = None,
+    ) -> pl.DataFrame:
+        """Per-case table of property values under the active filter.
+
+        One row per Monte Carlo case in the chosen parameter sheet, one
+        column per requested property. Values are converted to display
+        units (mcm/bcm/kcm per the Dataset's display formats); column
+        names include the unit, e.g. ``stoiip [mcm]``.
+
+        Args:
+            n: Number of rows to return (head-style). Use a large number
+                or ``None`` to get the full table.
+            parameter: Which parameter sheet to materialise. Defaults to
+                the first sheet, with a warning when more than one exists.
+            properties: Explicit list of properties to include. Defaults
+                to volumetric properties (bulk volume, stoiip, giip, etc.)
+                — the non-volumetric metadata entries like ``case`` and
+                ``folder`` are skipped.
+        """
+        ds = self._ds
+
+        # --- pick parameter ---
+        if parameter is None:
+            params = ds.parameters()
+            if not params:
+                raise ValueError("Dataset has no parameters.")
+            parameter = params[0]
+            if len(params) > 1:
+                warnings.warn(
+                    f"head: 'parameter' not specified — defaulting to '{parameter}'. "
+                    f"Other parameters: {params[1:]}. "
+                    f"Pass parameter=<name> to select another.",
+                    stacklevel=2,
+                )
+
+        if parameter not in ds.data:
+            raise KeyError(
+                f"Parameter '{parameter}' not in dataset. "
+                f"Available: {ds.parameters()}"
+            )
+
+        # --- pick properties ---
+        if properties is None:
+            try:
+                all_props = ds.properties(parameter)
+            except ValueError:
+                all_props = []
+            properties = [
+                p for p in all_props
+                if ds.unit_manager.is_volumetric_property(p)
+            ]
+
+        n_cases = len(ds.data[parameter])
+        base_filters = dict(self._filters) if self._filters else {}
+        base_filters.pop("property", None)
+
+        # --- build columns ---
+        columns: Dict[str, Any] = {"case": list(range(1, n_cases + 1))}
+
+        for prop in properties:
+            prop_filters = {**base_filters, "property": prop}
+            try:
+                values, _ = ds._extract_property_values(
+                    parameter, prop_filters, validate_finite=False
+                )
+            except Exception:
+                # Skip properties we can't extract under this filter
+                continue
+
+            multiplier = ds.unit_manager.get_display_multiplier(prop)
+            unit = ds.unit_manager.get_display_unit(prop)
+            col_name = f"{prop} [{unit}]" if unit else prop
+
+            converted = (np.asarray(values, dtype=np.float64) * multiplier).tolist()
+            # Pad or truncate to n_cases so columns align
+            if len(converted) < n_cases:
+                converted = converted + [None] * (n_cases - len(converted))
+            elif len(converted) > n_cases:
+                converted = converted[:n_cases]
+            columns[col_name] = converted
+
+        df = pl.DataFrame(columns)
+        if n is None:
+            return df
+        return df.head(n)
+
+    def __repr__(self) -> str:
+        title = self._filter_name if self._filter_name else "<inline>"
+        n_filters = len(self._filters) if self._filters else 0
+        return (
+            f"FilteredDataset(title={title!r}, "
+            f"filter_fields={n_filters}, "
+            f"dataset={self._ds.filepath.name!r})"
+        )
