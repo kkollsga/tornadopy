@@ -166,6 +166,10 @@ class FilterManager:
     """
 
     RESERVED_FILTER_KEYS = {'property'}
+    # Keys that may appear in filter dicts but are ignored for column selection.
+    # 'title' is the display label used in plot subtitles when the filter is
+    # accessed via Dataset.filter(...). 'name' is kept as a deprecated alias.
+    METADATA_FILTER_KEYS = {'title', 'name'}
 
     def __init__(self):
         self.stored_filters: Dict[str, Dict[str, Any]] = {}
@@ -183,6 +187,28 @@ class FilterManager:
                 f"Filter '{name}' contains reserved key(s) {sorted(bad)}. "
                 "The 'property' is set on the plot/compute call, not inside filters."
             )
+
+    def resolve_filter_title(
+        self,
+        filters: Union[Dict[str, Any], str, None],
+    ) -> Optional[str]:
+        """Pick the human-readable title for a filter argument.
+
+        Precedence: ``filters['title']`` (preferred) > ``filters['name']``
+        (legacy alias) > the preset key itself when ``filters`` is a string >
+        ``None`` when no title can be derived.
+        """
+        if filters is None:
+            return None
+        if isinstance(filters, str):
+            try:
+                resolved = self.get_filter(filters)
+            except KeyError:
+                return filters
+            return resolved.get('title') or resolved.get('name') or filters
+        if isinstance(filters, dict):
+            return filters.get('title') or filters.get('name')
+        return None
 
     def resolve_filter_preset(
         self,
@@ -947,7 +973,7 @@ class DataExtractor:
             mask = mask & (pl.col('column_type') == 'segment')
 
         # Metadata-only keys that should not be used for filtering
-        metadata_only_keys = {'name'}
+        metadata_only_keys = FilterManager.METADATA_FILTER_KEYS
 
         for field, value in filters_norm.items():
             if value is None:
@@ -2099,12 +2125,16 @@ class StatisticsComputer:
                         prop_stats[f'p{p}'] = perc_val
                     
                     elif stat == 'distribution':
-                        formatted_values = [
-                            self.unit_manager.format_for_display(
-                                prop, v, decimals, override_multiplier
-                            ) for v in values
-                        ]
-                        prop_stats['distribution'] = np.array(formatted_values)
+                        # Apply display multiplier but skip decimal rounding —
+                        # rounding here produces ties at the rounding step,
+                        # which show up as vertical jumps in the empirical CDF
+                        # and visually align with histogram bin edges.
+                        mult = self.unit_manager.get_display_multiplier(
+                            prop, override_multiplier
+                        )
+                        prop_stats['distribution'] = (
+                            np.asarray(values, dtype=np.float64) * mult
+                        )
                     
                     else:
                         raise ValueError(
@@ -3921,7 +3951,7 @@ class Dataset:
 
         if filters is None and self._active_filter is not None:
             filters = self._active_filter
-        filter_name = filters if isinstance(filters, str) else None
+        filter_name = self.filter_manager.resolve_filter_title(filters)
         filters = self.filter_manager.resolve_filter_preset(filters)
 
         result = self.statistics_computer.compute_correlation_grid(
@@ -3967,7 +3997,7 @@ class Dataset:
                 existing_skip = [existing_skip]
             merged_options['skip'] = list(set(existing_skip + skip_list))
 
-        filter_name = filters if isinstance(filters, str) else None
+        filter_name = self.filter_manager.resolve_filter_title(filters)
         property_name = property if isinstance(property, str) else (
             property[0] if isinstance(property, list) and property else None
         )
@@ -4006,7 +4036,7 @@ class Dataset:
         if property is None:
             raise ValueError("distribution_plot requires 'property'.")
 
-        filter_name = filters if isinstance(filters, str) else None
+        filter_name = self.filter_manager.resolve_filter_title(filters)
         resolved_parameter = self._resolve_parameter(parameter)
 
         resolved_filters = FilterManager.merge_property_filter(
@@ -4101,10 +4131,14 @@ class Dataset:
             return FilteredDataset(self, filters=None, filter_name=None)
         if isinstance(filters, str):
             resolved = dict(self.filter_manager.get_filter(filters))
-            return FilteredDataset(self, filters=resolved, filter_name=filters)
+            # Title precedence: explicit 'title' in dict > legacy 'name' in
+            # dict > preset key itself.
+            title = resolved.get('title') or resolved.get('name') or filters
+            return FilteredDataset(self, filters=resolved, filter_name=title)
         if isinstance(filters, dict):
             FilterManager._validate_filter_dict('<inline>', filters)
-            return FilteredDataset(self, filters=dict(filters), filter_name=None)
+            title = filters.get('title') or filters.get('name')
+            return FilteredDataset(self, filters=dict(filters), filter_name=title)
         raise TypeError(
             f"filters must be a dict, a stored-filter name, or None — "
             f"got {type(filters).__name__}."

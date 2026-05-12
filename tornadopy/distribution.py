@@ -52,7 +52,10 @@ def distribution_plot(
                 "distribution_plot received both a FilteredDataset (which "
                 "already carries a filter) and a filters= argument. Pick one."
             )
-        filters = ds.title if ds.title is not None else ds.filters
+        view_filters = dict(ds.filters) if ds.filters else {}
+        if ds.title:
+            view_filters['title'] = ds.title
+        filters = view_filters or None
         ds = ds.dataset
 
     if not isinstance(ds, Dataset):

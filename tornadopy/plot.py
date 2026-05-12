@@ -55,8 +55,12 @@ def tornado_plot(
                 "tornado_plot received both a FilteredDataset (which already "
                 "carries a filter) and a filters= argument. Pick one."
             )
-        # Prefer preset name so the subtitle shows the label
-        filters = ds.title if ds.title is not None else ds.filters
+        # Pass the resolved dict so column selection works, and inject the
+        # title so the subtitle picks it up via resolve_filter_title().
+        view_filters = dict(ds.filters) if ds.filters else {}
+        if ds.title:
+            view_filters['title'] = ds.title
+        filters = view_filters or None
         ds = ds.dataset
 
     if not isinstance(ds, Dataset):
