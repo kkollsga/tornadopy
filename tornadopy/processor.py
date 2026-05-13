@@ -536,6 +536,10 @@ class ExcelDataLoader:
     ) -> pl.DataFrame:
         """Normalize volumetric values to base units (m³).
 
+        All eligible columns are normalised in a single ``with_columns``
+        call to avoid the O(n²) DataFrame allocation that a per-column
+        loop produces on wide sheets.
+
         Uses ``sheet_units`` when provided so each sheet normalises against
         its own source units. Falls back to the global ``property_units``
         (the first sheet's) when not provided.
@@ -549,27 +553,39 @@ class ExcelDataLoader:
             else self.unit_manager.property_units
         )
 
+        df_cols = set(df.columns)
+        exprs: List[pl.Expr] = []
+
         for row in metadata.iter_rows(named=True):
             col_name = row['column_name']
             property_name = row['property']
 
             if not self.unit_manager.is_volumetric_property(property_name):
                 continue
-
-            if col_name not in df.columns:
+            if col_name not in df_cols:
+                continue
+            if property_name not in units_map:
                 continue
 
-            if property_name in units_map:
-                unit = units_map[property_name]
-                factor = self.unit_manager.get_normalization_factor(unit)
+            factor = self.unit_manager.get_normalization_factor(
+                units_map[property_name]
+            )
+            if factor == 1.0:
+                continue
 
-                if factor != 1.0:
-                    try:
-                        df = df.with_columns(
-                            (pl.col(col_name).cast(pl.Float64, strict=False) * factor).alias(col_name)
-                        )
-                    except Exception as e:
-                        print(f"[!] Warning: Could not normalize column '{col_name}' in sheet '{sheet_name}': {e}")
+            exprs.append(
+                (pl.col(col_name).cast(pl.Float64, strict=False) * factor)
+                .alias(col_name)
+            )
+
+        if exprs:
+            try:
+                df = df.with_columns(exprs)
+            except Exception as e:
+                print(
+                    f"[!] Warning: Could not normalize columns in sheet "
+                    f"'{sheet_name}': {e}"
+                )
 
         return df
 
@@ -710,22 +726,39 @@ class ExcelDataLoader:
             try:
                 segment_block = data_df.select(prop_segment_cols)
 
-                # Detect non-numeric values before casting
-                n_non_numeric = 0
-                bad_cells = []  # List of "CellRef='value'" strings
+                # Detect non-numeric values in a single polars pass.
+                # Per-column: count of rows that were a non-empty string
+                # but couldn't cast to Float64. The expensive cell-level
+                # drill-down (locating exact Excel coords) only runs when
+                # such rows actually exist.
                 col_map = structure_info.get('col_name_to_excel_col', {}) if structure_info else {}
                 data_start_row = structure_info.get('data_start_row', 1) if structure_info else 1
-                for col in prop_segment_cols:
-                    col_series = segment_block[col]
-                    casted = col_series.cast(pl.Float64, strict=False)
-                    was_non_null = col_series.is_not_null() & (col_series.cast(pl.Utf8).str.strip_chars() != "")
-                    became_null = casted.is_null() & was_non_null
-                    n_bad = became_null.sum()
-                    if n_bad > 0:
-                        n_non_numeric += n_bad
+
+                bad_counts_df = segment_block.select([
+                    (
+                        pl.col(c).cast(pl.Float64, strict=False).is_null()
+                        & pl.col(c).is_not_null()
+                        & (pl.col(c).cast(pl.Utf8).str.strip_chars() != "")
+                    ).sum().alias(c)
+                    for c in prop_segment_cols
+                ])
+                bad_counts = {
+                    c: int(bad_counts_df[c][0]) for c in prop_segment_cols
+                }
+                n_non_numeric = sum(bad_counts.values())
+                bad_cells: List[str] = []
+                if n_non_numeric > 0:
+                    # Only enumerate cells in the columns that have bad rows
+                    bad_col_names = [c for c, n in bad_counts.items() if n > 0]
+                    for col in bad_col_names:
+                        col_series = segment_block[col]
+                        became_null = (
+                            col_series.cast(pl.Float64, strict=False).is_null()
+                            & col_series.is_not_null()
+                            & (col_series.cast(pl.Utf8).str.strip_chars() != "")
+                        )
                         excel_col = self._excel_col_letter(col_map[col]) if col in col_map else col
-                        bad_row_indices = became_null.arg_true().to_list()
-                        for row_idx in bad_row_indices:
+                        for row_idx in became_null.arg_true().to_list():
                             excel_row = data_start_row + row_idx
                             val = str(col_series[row_idx])
                             bad_cells.append(f"{excel_col}{excel_row}='{val}'")
