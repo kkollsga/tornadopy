@@ -67,7 +67,7 @@ def _build_settings(settings: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         "grid_cell_width": 8.0,
         "grid_cell_height": 6.0,       # floor; height also scales with bar count
         "grid_bar_inches": 0.55,       # inches of cell height per tornado bar
-        "grid_col_gap": 0.55,          # inches of blank space between columns
+        "grid_col_gap": 1.40,          # inches between columns (fits per-cell y labels)
         "grid_row_gap": 0.55,          # inches of blank space between rows
         "cell_subtitle_pad": 16.0,
         # Feature toggles
@@ -652,7 +652,7 @@ def tornado_plot(
                 subtitle_override=(subtitle if not is_grid else None),
                 preferred_order=preferred_order,
                 show_xlabel=(r == nrows - 1),
-                show_param_labels=(c == 0),
+                show_param_labels=True,
                 show_ref_label=not is_grid,
                 bar_styles=_tornado_colors(cell_color, s),
                 positive_text_black=(cell_color is not None),
