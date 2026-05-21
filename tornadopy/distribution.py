@@ -321,8 +321,8 @@ def distribution_plot(
     outfile: Optional[Union[str, Path]] = None,
     target_bins: int = 20,
     color: Union[str, List[str]] = "blue",
-    reference_case: Optional[float] = None,
-    reference_label: str = "Ref case",
+    reference_case: Union[float, str, None] = None,
+    reference_label: Optional[str] = None,
     figsize: Optional[Tuple[float, float]] = None,
     settings: Optional[Dict[str, Any]] = None,
     bin_number: Optional[int] = None,
@@ -365,11 +365,15 @@ def distribution_plot(
                   percentiles, bins and the cumulative curve are computed.
                   In display units (same as the x-axis).
         clip_max: Optional upper bound, applied the same way as clip_min.
-        reference_case: Optional reference value. Shown in the subtitle
-                  ("``{reference_label}: {value}``", left of the P90/P50/P10
-                  values) and marked with a vertical line drawn below the bars.
-        reference_label: Label for the reference value — e.g. "Ref case"
-                  (default) or "Base case".
+        reference_case: Optional reference value. A number is used as-is.
+                  ``"ref"`` or ``"base"`` auto-detects the reference / base
+                  case from the dataset's base-case sheet (per cell — using
+                  that cell's property and filter). Either way the value is
+                  shown in the subtitle ("``{reference_label}: {value}``", left
+                  of the P90/P50/P10 values) and marked with a vertical line
+                  drawn below the bars. ``None`` (default) draws nothing.
+        reference_label: Label for the reference value. Defaults to
+                  "Base case" when ``reference_case="base"``, else "Ref case".
         title, unit, outfile, target_bins, figsize,
         settings, bin_number, bin_start, bin_end: Plot styling — same as before.
 
@@ -402,6 +406,14 @@ def distribution_plot(
         )
 
     s = _build_settings(settings)
+
+    # Resolve the reference label (default depends on which case is shown).
+    if reference_label is None:
+        reference_label = (
+            "Base case"
+            if isinstance(reference_case, str) and reference_case.strip().lower() == "base"
+            else "Ref case"
+        )
 
     # --- Figure sizing ---
     if figsize is not None:
@@ -464,9 +476,12 @@ def distribution_plot(
             # repeated in the per-cell subtitle.
             filter_name = dist_meta.get('filter_name')
             fill, outline, cell_alpha = _resolve_color(_cell_color(color, r, c))
+            ref_value = _resolve_reference(
+                datasets[r], reference_case, prop, row_filters[r], multiplier,
+            )
             _draw_distribution(
                 ax, dist_meta, s,
-                clip_min=clip_min, clip_max=clip_max, reference_case=reference_case,
+                clip_min=clip_min, clip_max=clip_max, reference_case=ref_value,
                 reference_label=reference_label,
                 target_bins=target_bins, bin_number=bin_number,
                 bin_start=bin_start, bin_end=bin_end, unit_override=unit,
@@ -539,6 +554,69 @@ def _filter_label(flt: Any, dist_meta: Dict[str, Any], row_idx: int) -> str:
         if parts:
             return ", ".join(parts)
     return f"Filter {row_idx + 1}"
+
+
+def _resolve_reference(
+    ds: Dataset,
+    ref_spec: Union[float, str, None],
+    prop: str,
+    flt: Any,
+    multiplier: Optional[float],
+) -> Optional[float]:
+    """Resolve a ``reference_case`` spec to a numeric value in display units.
+
+    A number is returned as-is. ``'base'`` / ``'ref'`` auto-detect the base
+    (row 0) / reference (row 1) case from the dataset's base-case sheet, for
+    this property and filter. Returns ``None`` (with a warning) when an
+    auto-detect is requested but unavailable.
+    """
+    if ref_spec is None:
+        return None
+    if isinstance(ref_spec, (int, float)) and not isinstance(ref_spec, bool):
+        return float(ref_spec)
+
+    key = str(ref_spec).strip().lower()
+    if key in ("ref", "reference"):
+        case_type = "reference"
+    elif key == "base":
+        case_type = "base"
+    else:
+        raise ValueError(
+            "reference_case must be a number, 'base', 'ref', or None — "
+            f"got {ref_spec!r}."
+        )
+
+    row_idx = 0 if case_type == "base" else 1  # base-case sheet: row 0 base, row 1 ref
+
+    base_sheet = ds.base_case_parameter
+    if base_sheet not in ds.parameters():
+        warnings.warn(
+            f"distribution_plot: reference_case={ref_spec!r} requested, but the "
+            f"base-case sheet '{base_sheet}' is not loaded — no reference line.",
+            stacklevel=3,
+        )
+        return None
+    try:
+        # Same extraction path the distribution itself uses, so the value
+        # lands on the same display scale as the x-axis.
+        flt_resolved = ds.filter_manager.resolve_filter_preset(flt)
+        prop_filters = {k: v for k, v in flt_resolved.items() if k != "property"}
+        prop_filters["property"] = prop
+        values, _ = ds._extract_property_values(
+            base_sheet, prop_filters, validate_finite=False
+        )
+        if row_idx >= len(values):
+            return None
+        return ds.unit_manager.format_for_display(
+            prop, values[row_idx], decimals=6, override_multiplier=multiplier
+        )
+    except Exception as e:
+        warnings.warn(
+            f"distribution_plot: could not resolve reference_case={ref_spec!r} "
+            f"for '{prop}': {e} — no reference line.",
+            stacklevel=3,
+        )
+        return None
 
 
 def _resolve_entry(entry: Any) -> Tuple[Dataset, Optional[Dict[str, Any]]]:

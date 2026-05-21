@@ -26,10 +26,11 @@ def _build_settings(settings: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         "pos_dark": "#2E5BFF",
         "neg_dark": "#E74C3C",
         # Single-colour mode (color=<family>): tints + opacities
+        "neg_shade": 700,        # palette shade for negative (left) bars
         "pos_shade": 400,        # palette shade for positive (right) bars
-        "neg_shade": 600,        # palette shade for negative (left) bars
         "inner_opacity": 100,    # % opacity for inner p90-p10 bars
-        "outer_opacity": 60,     # % opacity for outer min-max bars
+        "outer_opacity": 40,     # % opacity for outer min-max bars
+        "shadow_offset": 2.0,    # inner-bar shadow offset (points, outward)
         # Lines & fonts
         "outline_color": "#2C3E50",
         "label_color": "#1C2833",
@@ -195,6 +196,7 @@ def _draw_tornado(
     show_param_labels: bool,
     show_ref_label: bool,
     bar_styles: Dict[str, Tuple[Any, float]],
+    positive_text_black: bool,
 ) -> Dict[str, Any]:
     """Render one tornado chart onto ``ax``. Returns detected property/unit/filter."""
     # --- Auto-detect base, reference, filter_name, property_name, unit ---
@@ -328,7 +330,11 @@ def _draw_tornado(
                     ha='center', va='bottom', fontsize=s["reference_fontsize"],
                     color=s["reference_color"], zorder=4)
 
-    inner_bar_shadow = [patheffects.withSimplePatchShadow(offset=(1.5, -1.5), alpha=0.25)]
+    # Inner-bar shadows point straight outward: left on the negative side,
+    # right on the positive side.
+    _so = s["shadow_offset"]
+    neg_bar_shadow = [patheffects.withSimplePatchShadow(offset=(-_so, 0.0), alpha=0.25)]
+    pos_bar_shadow = [patheffects.withSimplePatchShadow(offset=(_so, 0.0), alpha=0.25)]
     white_text_outline = [patheffects.withStroke(linewidth=1.2, foreground='black', alpha=0.4)]
 
     def has_space_for_label(text, width_in_data_units, xspan):
@@ -357,19 +363,19 @@ def _draw_tornado(
                     color=po_color, alpha=po_alpha, zorder=1)
 
         neg_inner_width = pos_inner_width = 0
-        inner_patches = []
+        inner_neg = inner_pos = None
         if p90p10:
             p90, p10 = p90p10
             if p90 < base:
                 neg_inner_width = min(p10, base) - p90
                 ib = ax.barh(i, neg_inner_width, left=p90, height=s["bar_height"],
                              color=ni_color, alpha=ni_alpha, zorder=2)
-                inner_patches.append(ib[0])
+                inner_neg = ib[0]
             if p10 > base:
                 pos_inner_width = p10 - max(p90, base)
                 ib = ax.barh(i, pos_inner_width, left=max(p90, base), height=s["bar_height"],
                              color=pi_color, alpha=pi_alpha, zorder=2)
-                inner_patches.append(ib[0])
+                inner_pos = ib[0]
 
         # Outline on top — its rectangle also clips the inner-bar shadows so
         # they stay contained within the bar and never spill past the outline.
@@ -377,9 +383,12 @@ def _draw_tornado(
                           facecolor="none", edgecolor=s["outline_color"],
                           linewidth=s["bar_linewidth"], zorder=3)
         if s["show_bar_shadows"]:
-            for ib in inner_patches:
-                ib.set_path_effects(inner_bar_shadow)
-                ib.set_clip_path(outline[0])
+            if inner_neg is not None:
+                inner_neg.set_path_effects(neg_bar_shadow)
+                inner_neg.set_clip_path(outline[0])
+            if inner_pos is not None:
+                inner_pos.set_path_effects(pos_bar_shadow)
+                inner_pos.set_clip_path(outline[0])
 
         # --- Value labels with automatic space checking ---
         pad = s["value_offset"] * xspan
@@ -445,6 +454,11 @@ def _draw_tornado(
             if inside and lbl in ("p10", "p90"):
                 color = "white"
                 effects = white_text_outline
+            # Single-colour mode tints the positive bars light, so force all
+            # positive-side text to black for legibility.
+            if positive_text_black and val >= base:
+                color = "black"
+                effects = None
 
             if s["show_value_headers"]:
                 ax.text(x_pos, i - header_value_offset, lbl, ha=ha, va='center',
@@ -539,9 +553,11 @@ def tornado_plot(
         color: Optional single colour per chart. ``None`` keeps the default
                red/blue scheme. A palette family name (or any literal colour)
                tints both signs from one hue — negative bars at shade
-               ``neg_shade`` (600), positive at ``pos_shade`` (400); inner
+               ``neg_shade`` (700), positive at ``pos_shade`` (400); inner
                p90-p10 bars at ``inner_opacity`` (100%), outer min-max bars at
-               ``outer_opacity`` (60%). All four are tunable via ``settings``.
+               ``outer_opacity`` (40%). All four are tunable via ``settings``.
+               In single-colour mode the positive bars are a light tint, so
+               all positive-side value text is rendered black for legibility.
                In a grid, pass a flat list (per row) or nested list
                (``color[row][col]``, per cell).
         case_selection / selection_criteria: Forwarded to data extraction.
@@ -628,6 +644,7 @@ def tornado_plot(
             if isinstance(sections, dict):
                 sections = [sections]
 
+            cell_color = _cell_color(color, r, c)
             detected = _draw_tornado(
                 ax, sections, s,
                 base=base, reference_case=reference_case, unit_override=unit,
@@ -637,7 +654,8 @@ def tornado_plot(
                 show_xlabel=(r == nrows - 1),
                 show_param_labels=(c == 0),
                 show_ref_label=not is_grid,
-                bar_styles=_tornado_colors(_cell_color(color, r, c), s),
+                bar_styles=_tornado_colors(cell_color, s),
+                positive_text_black=(cell_color is not None),
             )
             if r == 0:
                 pn = detected.get("property_name") or prop

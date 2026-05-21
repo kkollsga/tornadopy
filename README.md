@@ -168,11 +168,13 @@ or a **nested list** `color[row][col]` for per-cell colours — e.g.
 `color=[["red-50", "blue"], ["green", "teal"]]`.
 
 `tornado_plot` also takes `color`, but a tornado uses **one colour per chart**:
-negative (left) bars are tinted at shade `neg_shade` (600), positive (right)
+negative (left) bars are tinted at shade `neg_shade` (700), positive (right)
 bars at `pos_shade` (400), and the inner p90–p10 bars vs the outer min–max bars
-are separated by opacity — `inner_opacity` (100) and `outer_opacity` (60).
-Omit `color` for the default red/blue scheme. All four parameters are tunable
-via `settings`. In a grid, `color` can be a flat or nested list, just like
+are separated by opacity — `inner_opacity` (100) and `outer_opacity` (40).
+Positive-side value text is drawn black in single-colour mode (the positive
+tint is light). Omit `color` for the default red/blue scheme. All four
+parameters are tunable via `settings`. In a grid, `color` can be a flat or
+nested list, just like
 `distribution_plot`.
 
 Single-plot mode still returns `(fig, ax, saved)`; in grid mode `ax` is the 2-D
