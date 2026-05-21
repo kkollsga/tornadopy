@@ -6,6 +6,7 @@ import matplotlib.patheffects as patheffects
 from matplotlib.ticker import AutoMinorLocator, FormatStrFormatter
 
 from .processor import Dataset, FilteredDataset
+from ._colors import _cell_color, _gap_fraction, _tint_pair
 
 if TYPE_CHECKING:
     from matplotlib.figure import Figure
@@ -19,11 +20,16 @@ def _build_settings(settings: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         "dpi": 160,
         "plot_bg_color": "#FAF0E6",
         "figure_bg_color": "white",
-        # Colors
+        # Default colours (used when color=None)
         "pos_light": "#A9CFF7",
         "neg_light": "#F5B7B1",
         "pos_dark": "#2E5BFF",
         "neg_dark": "#E74C3C",
+        # Single-colour mode (color=<family>): tints + opacities
+        "pos_shade": 400,        # palette shade for positive (right) bars
+        "neg_shade": 600,        # palette shade for negative (left) bars
+        "inner_opacity": 100,    # % opacity for inner p90-p10 bars
+        "outer_opacity": 60,     # % opacity for outer min-max bars
         # Lines & fonts
         "outline_color": "#2C3E50",
         "label_color": "#1C2833",
@@ -73,12 +79,30 @@ def _build_settings(settings: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     return s
 
 
-def _gap_fraction(gap_in: float, n: int, avail_in: float) -> float:
-    """Convert an inter-axes gap in inches to a subplots_adjust w/hspace fraction."""
-    if n <= 1:
-        return 0.0
-    axis_in = (avail_in - gap_in * (n - 1)) / n
-    return max(0.02, gap_in / axis_in) if axis_in > 0 else 0.3
+def _tornado_colors(color: Any, s: Dict[str, Any]) -> Dict[str, Tuple[Any, float]]:
+    """Return the four ``(colour, alpha)`` styles for the tornado bar layers.
+
+    With ``color=None`` the established default scheme is used (distinct
+    positive/negative hues). Given a single colour, both signs share that
+    family — negative bars take ``neg_shade``, positive bars ``pos_shade``,
+    and inner/outer bars are separated by ``inner_opacity``/``outer_opacity``.
+    """
+    if color is None:
+        return {
+            "neg_outer": (s["neg_light"], 1.0),
+            "neg_inner": (s["neg_dark"], 0.9),
+            "pos_outer": (s["pos_light"], 1.0),
+            "pos_inner": (s["pos_dark"], 0.9),
+        }
+    pos_fill, neg_fill = _tint_pair(color, s["pos_shade"], s["neg_shade"])
+    inner_a = max(0.0, min(1.0, s["inner_opacity"] / 100.0))
+    outer_a = max(0.0, min(1.0, s["outer_opacity"] / 100.0))
+    return {
+        "neg_outer": (neg_fill, outer_a),
+        "neg_inner": (neg_fill, inner_a),
+        "pos_outer": (pos_fill, outer_a),
+        "pos_inner": (pos_fill, inner_a),
+    }
 
 
 def _filter_label(flt: Any, idx: int) -> str:
@@ -170,6 +194,7 @@ def _draw_tornado(
     show_xlabel: bool,
     show_param_labels: bool,
     show_ref_label: bool,
+    bar_styles: Dict[str, Tuple[Any, float]],
 ) -> Dict[str, Any]:
     """Render one tornado chart onto ``ax``. Returns detected property/unit/filter."""
     # --- Auto-detect base, reference, filter_name, property_name, unit ---
@@ -310,6 +335,11 @@ def _draw_tornado(
         char_width = 0.0065 * xspan * (s["value_fontsize"] / 8.0)
         return width_in_data_units > len(text) * char_width * 1.3
 
+    no_color, no_alpha = bar_styles["neg_outer"]
+    ni_color, ni_alpha = bar_styles["neg_inner"]
+    po_color, po_alpha = bar_styles["pos_outer"]
+    pi_color, pi_alpha = bar_styles["pos_inner"]
+
     # --- Draw bars ---
     for i, d in enumerate(data):
         low, high, p90p10 = d["low"], d["high"], d.get("p90p10")
@@ -318,7 +348,7 @@ def _draw_tornado(
         if low < base:
             neg_outer_width = min(high, base) - low
             bar = ax.barh(i, neg_outer_width, left=low, height=s["bar_height"],
-                          color=s["neg_light"], zorder=1)
+                          color=no_color, alpha=no_alpha, zorder=1)
             if s["show_bar_shadows"]:
                 bar[0].set_path_effects(outer_bar_shadow)
 
@@ -326,7 +356,7 @@ def _draw_tornado(
         if high > base:
             pos_outer_width = high - max(low, base)
             bar = ax.barh(i, pos_outer_width, left=max(low, base), height=s["bar_height"],
-                          color=s["pos_light"], zorder=1)
+                          color=po_color, alpha=po_alpha, zorder=1)
             if s["show_bar_shadows"]:
                 bar[0].set_path_effects(outer_bar_shadow)
 
@@ -336,11 +366,11 @@ def _draw_tornado(
             if p90 < base:
                 neg_inner_width = min(p10, base) - p90
                 ax.barh(i, neg_inner_width, left=p90, height=s["bar_height"],
-                        color=s["neg_dark"], alpha=0.9, zorder=2)
+                        color=ni_color, alpha=ni_alpha, zorder=2)
             if p10 > base:
                 pos_inner_width = p10 - max(p90, base)
                 ax.barh(i, pos_inner_width, left=max(p90, base), height=s["bar_height"],
-                        color=s["pos_dark"], alpha=0.9, zorder=2)
+                        color=pi_color, alpha=pi_alpha, zorder=2)
 
         ax.barh(i, high - low, left=low, height=s["bar_height"], facecolor="none",
                 edgecolor=s["outline_color"], linewidth=s["bar_linewidth"], zorder=3)
@@ -466,6 +496,7 @@ def tornado_plot(
     property: Union[str, List[str]],
     filters: Union[Dict[str, Any], str, List[Union[Dict[str, Any], str]], None] = None,
     multiplier: Optional[float] = None,
+    color: Union[str, List[Any], None] = None,
     skip: Union[str, List[str], None] = None,
     case_selection: bool = False,
     selection_criteria: Optional[Dict[str, Any]] = None,
@@ -499,6 +530,14 @@ def tornado_plot(
                  one row per filter. Must be None when ``ds`` is a list (each
                  entry carries its own filter).
         multiplier: Optional display multiplier override.
+        color: Optional single colour per chart. ``None`` keeps the default
+               red/blue scheme. A palette family name (or any literal colour)
+               tints both signs from one hue — negative bars at shade
+               ``neg_shade`` (600), positive at ``pos_shade`` (400); inner
+               p90-p10 bars at ``inner_opacity`` (100%), outer min-max bars at
+               ``outer_opacity`` (60%). All four are tunable via ``settings``.
+               In a grid, pass a flat list (per row) or nested list
+               (``color[row][col]``, per cell).
         case_selection / selection_criteria: Forwarded to data extraction.
         title, subtitle, outfile, base, reference_case, unit, filter_name,
         preferred_order, figsize, settings: Plot styling. ``subtitle`` and
@@ -592,6 +631,7 @@ def tornado_plot(
                 show_xlabel=(r == nrows - 1),
                 show_param_labels=(c == 0),
                 show_ref_label=not is_grid,
+                bar_styles=_tornado_colors(_cell_color(color, r, c), s),
             )
             if r == 0:
                 pn = detected.get("property_name") or prop
