@@ -57,11 +57,11 @@ def _build_settings(settings: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         "left_margin": 0.18,
         "header_value_spacing": 0.09,
         # Grid-mode layout
-        "grid_cell_width": 8.5,
+        "grid_cell_width": 8.0,
         "grid_cell_height": 6.0,       # floor; height also scales with bar count
         "grid_bar_inches": 0.55,       # inches of cell height per tornado bar
-        "grid_wspace": 0.20,
-        "grid_hspace": 0.30,
+        "grid_col_gap": 0.55,          # inches of blank space between columns
+        "grid_row_gap": 0.55,          # inches of blank space between rows
         "cell_subtitle_pad": 16.0,
         # Feature toggles
         "show_relative_values": False,
@@ -71,6 +71,14 @@ def _build_settings(settings: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     if settings:
         s.update(settings)
     return s
+
+
+def _gap_fraction(gap_in: float, n: int, avail_in: float) -> float:
+    """Convert an inter-axes gap in inches to a subplots_adjust w/hspace fraction."""
+    if n <= 1:
+        return 0.0
+    axis_in = (avail_in - gap_in * (n - 1)) / n
+    return max(0.02, gap_in / axis_in) if axis_in > 0 else 0.3
 
 
 def _filter_label(flt: Any, idx: int) -> str:
@@ -534,16 +542,31 @@ def tornado_plot(
                              squeeze=False)
     fig.patch.set_facecolor(s["figure_bg_color"])
 
+    has_col_headers = is_grid and ncols > 1
+    has_row_headers = is_grid and nrows > 1
+
     # --- Margins ---
+    # Computed in inches then converted to fractions so padding stays
+    # constant regardless of grid size (a fixed fraction margin balloons
+    # into a wide white gap on large figures).
     if is_grid:
-        left = s["left_margin"] + (0.03 if nrows > 1 else 0.0)
-        right = 0.97
-        bottom = 0.085
-        top = 0.875 - (0.03 if ncols > 1 else 0.0)
-        fig.subplots_adjust(left=left, right=right, bottom=bottom, top=top,
-                            wspace=s["grid_wspace"], hspace=s["grid_hspace"])
+        m_left = 1.25 + (0.34 if has_row_headers else 0.0)   # param labels(+row hdr)
+        m_right = 0.35
+        m_bottom = 0.62
+        m_top = 0.55 + (0.72 if has_col_headers else 0.0)    # fig title(+col hdr)
+
+        left = m_left / fig_w
+        right = 1.0 - m_right / fig_w
+        bottom = m_bottom / fig_h
+        top = 1.0 - m_top / fig_h
+        fig.subplots_adjust(
+            left=left, right=right, bottom=bottom, top=top,
+            wspace=_gap_fraction(s["grid_col_gap"], ncols, (right - left) * fig_w),
+            hspace=_gap_fraction(s["grid_row_gap"], nrows, (top - bottom) * fig_h),
+        )
     else:
-        fig.subplots_adjust(left=s["left_margin"], right=0.95, bottom=0.12, top=0.88)
+        top = 0.88
+        fig.subplots_adjust(left=s["left_margin"], right=0.95, bottom=0.12, top=top)
 
     # --- Draw each cell ---
     col_labels: List[str] = []
@@ -581,20 +604,22 @@ def tornado_plot(
                                    or _filter_label(row_filters[r], r))
 
     # --- Figure title ---
-    fig.text(0.5, 0.975, title, ha="center", va="top",
+    fig.text(0.5, 1.0 - 0.30 / fig_h, title, ha="center", va="top",
              fontsize=s["title_fontsize"], fontweight="bold", color=s["label_color"])
 
     # --- Grid row / column headers ---
-    if is_grid and ncols > 1:
+    if has_col_headers:
+        col_y = 1.0 - 0.64 / fig_h
         for c in range(ncols):
             box = axes[0][c].get_position()
-            fig.text((box.x0 + box.x1) / 2, top + 0.052, col_labels[c],
+            fig.text((box.x0 + box.x1) / 2, col_y, col_labels[c],
                      ha="center", va="center", fontsize=s["header_fontsize"],
                      fontweight="bold", color=s["label_color"])
-    if is_grid and nrows > 1:
+    if has_row_headers:
+        row_x = 0.30 / fig_w
         for r in range(nrows):
             box = axes[r][0].get_position()
-            fig.text(0.018, (box.y0 + box.y1) / 2, row_labels[r],
+            fig.text(row_x, (box.y0 + box.y1) / 2, row_labels[r],
                      ha="center", va="center", rotation=90,
                      fontsize=s["header_fontsize"], fontweight="bold",
                      color=s["label_color"])

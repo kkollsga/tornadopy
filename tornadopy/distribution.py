@@ -41,6 +41,29 @@ def _resolve_color(c: Any) -> Tuple[Any, Any]:
         return _COLOR_MAP["blue"]["light"], _COLOR_MAP["blue"]["dark"]
 
 
+def _cell_color(color: Any, r: int, c: int) -> Any:
+    """Pick the colour spec for grid cell (row r, column c).
+
+    A scalar applies to every cell; a flat list is one colour per row; a
+    nested list is indexed ``color[row][col]`` (per-cell). Indices cycle
+    when an axis is shorter than the grid.
+    """
+    if not isinstance(color, list) or not color:
+        return color
+    entry = color[r % len(color)]
+    if isinstance(entry, list):
+        return entry[c % len(entry)] if entry else "blue"
+    return entry
+
+
+def _gap_fraction(gap_in: float, n: int, avail_in: float) -> float:
+    """Convert an inter-axes gap in inches to a subplots_adjust w/hspace fraction."""
+    if n <= 1:
+        return 0.0
+    axis_in = (avail_in - gap_in * (n - 1)) / n
+    return max(0.02, gap_in / axis_in) if axis_in > 0 else 0.3
+
+
 def _build_settings(settings: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     """Assemble the settings dict (default colour scheme; per-row colours
     are applied later by distribution_plot)."""
@@ -88,8 +111,8 @@ def _build_settings(settings: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         # Grid-mode layout
         "grid_cell_width": 6.0,
         "grid_cell_height": 4.2,
-        "grid_wspace": 0.30,
-        "grid_hspace": 0.62,
+        "grid_col_gap": 0.95,        # inches of blank space between columns
+        "grid_row_gap": 0.58,        # inches of blank space between rows
         "cell_subtitle_pad": 5.0,
         # Percentile markers
         "show_percentile_markers": True,
@@ -375,8 +398,9 @@ def distribution_plot(
         multiplier: Optional display multiplier override.
         color: A colour scheme name ('blue', 'red', 'green', 'orange', 'purple',
                'fuchsia', 'yellow') or any literal matplotlib colour. Pass a
-               **list** to colour each grid row differently (cycled if shorter
-               than the row count).
+               **flat list** to colour each grid row, or a **nested list**
+               (``color[row][col]``) to colour each cell individually; indices
+               cycle when shorter than the grid.
         clip_min: Optional lower bound. Cases below it are dropped before
                   percentiles, bins and the cumulative curve are computed.
                   In display units (same as the x-axis).
@@ -413,7 +437,6 @@ def distribution_plot(
         )
 
     s = _build_settings(settings)
-    color_list = list(color) if isinstance(color, list) else [color]
 
     # --- Figure sizing ---
     if figsize is not None:
@@ -430,17 +453,32 @@ def distribution_plot(
     )
     fig.patch.set_facecolor(s["figure_bg_color"])
 
-    # --- Margins: tighter for grids, with room reserved for headers ---
+    has_col_headers = is_grid and ncols > 1
+    has_row_headers = is_grid and nrows > 1
+
+    # --- Margins ---
+    # Grid margins are computed in *inches* then converted to fractions, so
+    # padding stays constant regardless of figure size — a fixed fraction
+    # margin balloons into a wide white gap on large grids.
     if is_grid:
-        left = 0.085 + (0.055 if nrows > 1 else 0.0)
-        right = 0.93
-        bottom = 0.085
-        top = 0.875 - (0.03 if ncols > 1 else 0.0)
-        fig.subplots_adjust(left=left, right=right, bottom=bottom, top=top,
-                            wspace=s["grid_wspace"], hspace=s["grid_hspace"])
+        m_left = 0.66 + (0.34 if has_row_headers else 0.0)   # ylabel+ticks(+row hdr)
+        m_right = 0.86                                        # cumulative ticks+label
+        m_bottom = 0.60                                       # xlabel + ticks
+        m_top = 0.52 + (0.55 if has_col_headers else 0.0)     # fig title(+col hdr)
+
+        left = m_left / fig_w
+        right = 1.0 - m_right / fig_w
+        bottom = m_bottom / fig_h
+        top = 1.0 - m_top / fig_h
+        fig.subplots_adjust(
+            left=left, right=right, bottom=bottom, top=top,
+            wspace=_gap_fraction(s["grid_col_gap"], ncols, (right - left) * fig_w),
+            hspace=_gap_fraction(s["grid_row_gap"], nrows, (top - bottom) * fig_h),
+        )
     else:
+        top = s["top_margin"]
         fig.subplots_adjust(left=s["left_margin"], right=s["right_margin"],
-                            bottom=s["bottom_margin"], top=s["top_margin"])
+                            bottom=s["bottom_margin"], top=top)
 
     # --- Draw each cell ---
     col_labels: List[str] = []
@@ -460,7 +498,7 @@ def distribution_plot(
             # In grid mode the filter name is the row header, so it is not
             # repeated in the per-cell subtitle.
             filter_name = dist_meta.get('filter_name')
-            fill, outline = _resolve_color(color_list[r % len(color_list)])
+            fill, outline = _resolve_color(_cell_color(color, r, c))
             _draw_distribution(
                 ax, dist_meta, s,
                 clip_min=clip_min, clip_max=clip_max, reference_case=reference_case,
@@ -486,20 +524,22 @@ def distribution_plot(
         first = datasets[0]._distribution_data(parameter=parameter, property=properties[0],
                                                filters=row_filters[0], multiplier=multiplier)
         title = first.get('title', 'Distribution') if isinstance(first, dict) else 'Distribution'
-    fig.text(0.5, 0.975, title, ha="center", va="top",
+    fig.text(0.5, 1.0 - 0.30 / fig_h, title, ha="center", va="top",
              fontsize=s["title_fontsize"], fontweight="bold", color=s["text_color"])
 
     # --- Grid row / column headers ---
-    if is_grid and ncols > 1:
+    if has_col_headers:
+        col_y = 1.0 - 0.62 / fig_h
         for c in range(ncols):
             box = axes[0][c].get_position()
-            fig.text((box.x0 + box.x1) / 2, top + 0.052, col_labels[c],
+            fig.text((box.x0 + box.x1) / 2, col_y, col_labels[c],
                      ha="center", va="center", fontsize=s["header_fontsize"],
                      fontweight="bold", color=s["text_color"])
-    if is_grid and nrows > 1:
+    if has_row_headers:
+        row_x = 0.30 / fig_w
         for r in range(nrows):
             box = axes[r][0].get_position()
-            fig.text(0.018, (box.y0 + box.y1) / 2, row_labels[r],
+            fig.text(row_x, (box.y0 + box.y1) / 2, row_labels[r],
                      ha="center", va="center", rotation=90,
                      fontsize=s["header_fontsize"], fontweight="bold",
                      color=s["text_color"])

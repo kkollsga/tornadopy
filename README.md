@@ -151,14 +151,17 @@ fig, axes, _ = tornado_plot(
 
 Each row is labelled with its filter name, each column with its property name.
 Only the bottom row draws x-axis labels and only the left column draws y-labels,
-so the subplots stay as large as possible. The figure auto-sizes to the grid;
-pass `figsize=(w, h)` for an explicit total size, or tune the `settings` keys
-`grid_cell_width` / `grid_cell_height` / `grid_wspace` / `grid_hspace`.
+so the subplots stay as large as possible. Grid margins and inter-cell gaps are
+sized in inches, so padding stays tight no matter how large the grid is. The
+figure auto-sizes to the grid; pass `figsize=(w, h)` for an explicit total size,
+or tune the `settings` keys `grid_cell_width` / `grid_cell_height` /
+`grid_col_gap` / `grid_row_gap` (the gaps are in inches).
 
-`distribution_plot`'s `color` accepts a list — one entry per row, cycled if
-shorter. Each entry is a scheme name (`blue`, `red`, `green`, `orange`,
+`distribution_plot`'s `color` accepts a **flat list** (one colour per row,
+cycled) or a **nested list** indexed `color[row][col]` to colour every cell
+individually. Each entry is a scheme name (`blue`, `red`, `green`, `orange`,
 `purple`, `fuchsia`, `yellow`) or any literal matplotlib colour (hex / CSS
-name).
+name) — e.g. `color=[["red", "blue"], ["green", "cyan"]]` for a 2×2 grid.
 
 Single-plot mode still returns `(fig, ax, saved)`; in grid mode `ax` is the 2-D
 array of axes. A row's label comes from a stored-preset name, a `title` key in
