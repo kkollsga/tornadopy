@@ -128,6 +128,36 @@ ds.ref_case("stoiip", filters="north")
 The base / reference sheet is set at construction time (`base_case="Base_case"`
 by default). Sheet 0 = base; sheet 1 = reference.
 
+## Extracting a case by percentile
+
+`extract_case` returns the **`Case`** whose property value is closest to a
+percentile or summary statistic. The result is a real realisation from the
+sheet — printable, and with variable/metadata access.
+
+```python
+# Single case — the realisation nearest the median stoiip
+case = ds.extract_case("stoiip", parameter="NTGseed", percentile=50)
+
+print(case)              # Case NTGseed_<idx> (p50) + stoiip, giip, ... + selection info
+case.var("NTGseed")      # a $-prefixed variable value
+case.variables()         # every variable on the case
+case.properties()        # {'stoiip': ..., 'giip': ...}
+case.idx, case.type      # row index, "p50"
+case.selection_info      # {'selection_values': {'stoiip_target': ..., 'stoiip_actual': ...}, ...}
+
+# Several at once — pass a list, get a list back
+p10, p50, p90 = ds.extract_case("stoiip", parameter="NTGseed", percentile=[10, 50, 90])
+
+# Named stats instead of a percentile
+hi = ds.extract_case("stoiip", parameter="NTGseed", stat="max")
+lo = ds.extract_case("stoiip", parameter="NTGseed", stat=["min", "mean"])
+```
+
+`percentile` is the literal percentile (`90` = high value), and the match is
+the realisation nearest the interpolated target. `filters` scopes which
+segments are summed before ranking. For multi-property weighted selection use
+`compute(..., case_selection=True)` instead.
+
 ## Statistics (raw)
 
 For numerical work without plotting, use `compute` and `compute_batch` directly.

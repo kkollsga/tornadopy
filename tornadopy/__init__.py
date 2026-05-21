@@ -7,7 +7,7 @@ generating professional tornado charts for uncertainty analysis.
 
 from typing import List
 
-from .processor import Dataset, FilteredDataset
+from .processor import Case, Dataset, FilteredDataset
 from .plot import tornado_plot
 from .distribution import distribution_plot
 from .correlation import correlation_plot
@@ -23,6 +23,7 @@ except Exception:
 __all__: List[str] = [
     "Dataset",
     "FilteredDataset",
+    "Case",
     "tornado_plot",
     "distribution_plot",
     "correlation_plot",

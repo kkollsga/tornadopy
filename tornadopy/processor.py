@@ -1765,29 +1765,40 @@ class CaseManager:
         
         metadata = self.processor.metadata[parameter]
         dynamic_field_names = self.processor.dynamic_fields.get(parameter, [])
-        
+
         properties_agg = {}
         hierarchy = {}
-        
+
+        # On sheets that carry per-segment columns, the single-header QC
+        # column is a redundant grand total — summing it alongside the
+        # segments would double the property value. Aggregate segments
+        # only (matching extract_values/head/stats/plots); fall back to
+        # QC columns on QC-only sheets so those still produce totals.
+        has_segments = (
+            'column_type' in metadata.columns
+            and (metadata['column_type'] == 'segment').any()
+        )
+
         for row in metadata.iter_rows(named=True):
             col_name = row['column_name']
             prop = row['property']
-            
+
             if col_name not in case_data:
                 continue
-                
+
             value = case_data[col_name]
-            
+
             if value is not None:
                 try:
                     value = self.unit_manager._to_float(value, decimals)
                 except (TypeError, ValueError):
                     pass
-            
+
             if value is not None and isinstance(value, (int, float)):
-                if prop not in properties_agg:
-                    properties_agg[prop] = 0.0
-                properties_agg[prop] += value
+                if not (has_segments and row.get('column_type') == 'qc'):
+                    if prop not in properties_agg:
+                        properties_agg[prop] = 0.0
+                    properties_agg[prop] += value
             
             path_parts = []
             for field_name in dynamic_field_names:
@@ -3713,7 +3724,154 @@ class Dataset:
                 f"base_case parameter when initializing Dataset."
             )
         return self.case_manager.get_case(1, self.base_case_parameter)
-    
+
+    def extract_case(
+        self,
+        property: str,
+        parameter: str = None,
+        percentile: Union[float, List[float], None] = None,
+        stat: Union[str, List[str], None] = None,
+        filters: Union[Dict[str, Any], str, None] = None,
+        multiplier: float = None,
+    ) -> Union[Case, List[Case]]:
+        """Pull the realisation that best matches a percentile or summary stat.
+
+        Ranks every Monte Carlo case in ``parameter`` by ``property`` and
+        returns the :class:`Case` whose value is closest to the requested
+        target. The target is an interpolated percentile (``percentile=``)
+        or a named summary statistic (``stat=``); the returned Case is
+        always a real realisation from the sheet — never synthesised.
+
+        Args:
+            property: Property whose distribution defines the target,
+                e.g. ``"stoiip"``. Segments matching ``filters`` are summed.
+            parameter: Sheet to draw cases from. Defaults to the first sheet.
+            percentile: A percentile in 0–100, or a list of them. ``50`` is
+                the median. This is the literal percentile — ``percentile=90``
+                is the high value, not the petroleum-convention P90.
+            stat: ``"min"``, ``"max"``, ``"mean"`` or ``"median"`` — or a
+                list of them. ``"median"`` is equivalent to ``percentile=50``.
+            filters: Spatial filter dict or stored-preset name (falls back to
+                the active filter when omitted). Must not contain a
+                ``'property'`` key. The filter scopes which segments are
+                summed for the percentile/stat ranking.
+            multiplier: Display-unit override for the returned Case(s).
+
+        Returns:
+            A single :class:`Case` when exactly one selector is given as a
+            scalar; a list of :class:`Case` when any selector is a list or
+            when ``percentile`` and ``stat`` are combined. Each Case exposes
+            ``.type`` (``"p50"``, ``"max"``, …), ``.idx``, ``.properties()``
+            and ``.var("NTGseed")``; ``.selection_info`` carries the target
+            value, the matched value and the distance between them.
+
+        Raises:
+            ValueError: if no selector is given, a percentile falls outside
+                0–100, an unknown ``stat`` is passed, or no finite
+                ``property`` values exist for the filter.
+        """
+        if not isinstance(property, str) or not property.strip():
+            raise ValueError(
+                "extract_case needs a single property name, e.g. "
+                "extract_case('stoiip', percentile=50)."
+            )
+        if percentile is None and stat is None:
+            raise ValueError(
+                "extract_case needs 'percentile' (0–100) and/or 'stat' "
+                "('min', 'max', 'mean', 'median')."
+            )
+
+        resolved = self._resolve_parameter(parameter)
+
+        if filters is None and self._active_filter is not None:
+            filters = self._active_filter
+        filters = self.filter_manager.resolve_filter_preset(filters)
+        filters = FilterManager.merge_property_filter(filters, property)
+
+        # validate_finite=False keeps row indices aligned with the sheet's
+        # data rows, so the matched index maps back to the right realisation.
+        values, _ = self._extract_property_values(
+            resolved, filters, validate_finite=False
+        )
+        values = np.asarray(values, dtype=np.float64)
+        finite = np.isfinite(values)
+        if not finite.any():
+            raise ValueError(
+                f"No finite '{property}' values in '{resolved}' for the "
+                f"given filters — cannot select a case."
+            )
+        finite_values = values[finite]
+
+        # Build the selector list: (label, target_value, method_label).
+        selectors: List[Tuple[str, float, str]] = []
+        plural = isinstance(percentile, list) or isinstance(stat, list)
+        if percentile is not None and stat is not None:
+            plural = True
+
+        if percentile is not None:
+            pcts = percentile if isinstance(percentile, list) else [percentile]
+            for p in pcts:
+                p = float(p)
+                if not 0.0 <= p <= 100.0:
+                    raise ValueError(f"percentile must be in 0–100, got {p:g}.")
+                label = f"p{int(p)}" if p == int(p) else f"p{p:g}"
+                target = float(np.percentile(finite_values, p))
+                selectors.append((label, target, f"percentile {p:g}"))
+
+        if stat is not None:
+            stat_fns = {
+                "min": np.min, "max": np.max,
+                "mean": np.mean, "median": np.median,
+            }
+            stats_in = stat if isinstance(stat, list) else [stat]
+            for s in stats_in:
+                key = str(s).strip().lower()
+                if key not in stat_fns:
+                    raise ValueError(
+                        f"Unknown stat '{s}'. Use one of "
+                        f"{sorted(stat_fns)} or pass a percentile."
+                    )
+                target = float(stat_fns[key](finite_values))
+                selectors.append((key, target, key))
+
+        decimals = 6
+        cases: List[Case] = []
+        for label, target, method in selectors:
+            dist = np.where(finite, np.abs(values - target), np.inf)
+            idx = int(np.argmin(dist))
+            actual = float(values[idx])
+
+            selection_values = {
+                f"{property}_target": self.unit_manager.format_for_display(
+                    property, target, decimals, multiplier
+                ),
+                f"{property}_actual": self.unit_manager.format_for_display(
+                    property, actual, decimals, multiplier
+                ),
+            }
+            display_distance = self.unit_manager.format_for_display(
+                property, abs(actual - target), decimals, multiplier
+            )
+
+            cases.append(
+                self.statistics_computer.create_selected_case(
+                    index=idx,
+                    parameter=resolved,
+                    case_type=label,
+                    specs=None,
+                    weighted_distance=display_distance,
+                    selection_values=selection_values,
+                    selection_method=method,
+                    filters=filters,
+                    decimals=decimals,
+                    override_multiplier=multiplier,
+                )
+            )
+
+        if plural:
+            return cases
+        return cases[0]
+
     # ================================================================
     # PUBLIC API - STATISTICS COMPUTATION
     # ================================================================
@@ -4714,6 +4872,28 @@ class FilteredDataset:
             property=property,
             parameter=parameter,
             filters=self._filters,
+        )
+
+    def extract_case(
+        self,
+        property: str,
+        parameter: str = None,
+        percentile: Union[float, List[float], None] = None,
+        stat: Union[str, List[str], None] = None,
+        multiplier: float = None,
+    ) -> Union[Case, List[Case]]:
+        """Extract a percentile/stat case under this view's filter.
+
+        See :meth:`Dataset.extract_case`. The view's filter is applied
+        automatically.
+        """
+        return self._ds.extract_case(
+            property=property,
+            parameter=parameter,
+            percentile=percentile,
+            stat=stat,
+            filters=self._filters,
+            multiplier=multiplier,
         )
 
     def __repr__(self) -> str:

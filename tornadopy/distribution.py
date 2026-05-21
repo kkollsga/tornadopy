@@ -31,6 +31,8 @@ def distribution_plot(
     bin_number: Optional[int] = None,
     bin_start: Optional[float] = None,
     bin_end: Optional[float] = None,
+    clip_min: Optional[float] = None,
+    clip_max: Optional[float] = None,
 ) -> Tuple["Figure", "Axes", Optional[str]]:
     """
     Distribution histogram (with cumulative curve) for one property of one parameter.
@@ -43,6 +45,10 @@ def distribution_plot(
         filters: Spatial filter dict ({field: value(s)}) or stored-filter name.
                  Must not contain a 'property' key.
         multiplier: Optional display multiplier override.
+        clip_min: Optional lower bound. Cases with a value below it are
+                  dropped before percentiles, bins and the cumulative curve
+                  are computed. Given in display units (same as the x-axis).
+        clip_max: Optional upper bound, applied the same way as clip_min.
         title, unit, outfile, target_bins, color, reference_case, figsize,
         settings, bin_number, bin_start, bin_end: Plot styling — same as before.
     """
@@ -174,6 +180,35 @@ def distribution_plot(
 
     if len(distribution_data) == 0:
         raise ValueError("No valid data points")
+
+    # --- Optional clipping: drop cases outside [clip_min, clip_max] ---
+    # Applied before percentiles/bins/cumulative so every element of the
+    # plot reflects only the retained cases. Bounds are in display units.
+    if clip_min is not None and clip_max is not None and clip_min > clip_max:
+        raise ValueError(
+            f"clip_min ({clip_min}) must not exceed clip_max ({clip_max})."
+        )
+
+    if clip_min is not None or clip_max is not None:
+        n_before = len(distribution_data)
+        if clip_min is not None:
+            distribution_data = distribution_data[distribution_data >= clip_min]
+        if clip_max is not None:
+            distribution_data = distribution_data[distribution_data <= clip_max]
+
+        if len(distribution_data) == 0:
+            raise ValueError(
+                f"No data points remain after clipping to "
+                f"[{clip_min}, {clip_max}]."
+            )
+
+        n_clipped = n_before - len(distribution_data)
+        if n_clipped:
+            warnings.warn(
+                f"distribution_plot: dropped {n_clipped} of {n_before} "
+                f"case(s) outside [{clip_min}, {clip_max}].",
+                stacklevel=2,
+            )
 
     # --- Calculate percentiles ---
     p90 = np.percentile(distribution_data, 10)  # P90 = 10th percentile (low value)
