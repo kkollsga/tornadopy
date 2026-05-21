@@ -120,13 +120,22 @@ inherently across all sheets.
 ## Base / reference cases
 
 ```python
-ds.base_case("stoiip")
-ds.base_case("stoiip", filters="north")
-ds.ref_case("stoiip", filters="north")
+ds.base_case()                          # full (unfiltered) base case as a Case
+ds.base_case(filters="north")           # volumes summed over the 'north' segments
+ds.base_case("stoiip", filters="north") # focus on one property
+ds.ref_case("stoiip", filters="north")  # same, for the reference case
+
+bc = ds.base_case(filters="north")
+bc.properties()                         # {'stoiip': ..., 'giip': ...}
+bc["stoiip"]                            # a single volume
+
+ds.filter("north").base_case()          # a FilteredDataset applies its filter
 ```
 
-The base / reference sheet is set at construction time (`base_case="Base_case"`
-by default). Sheet 0 = base; sheet 1 = reference.
+Both `property` and `filters` are optional — called bare, `base_case()` /
+`ref_case()` return the full unfiltered case. The base / reference sheet is set
+at construction time (`base_case="Base_case"` by default). Row 0 = base;
+row 1 = reference.
 
 ## Extracting a case by percentile
 

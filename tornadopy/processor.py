@@ -3695,9 +3695,23 @@ class Dataset:
     # PUBLIC API - BASE & REFERENCE CASE
     # ================================================================
     
-    def base_case(self) -> Case:
-        """Get base case as a Case object.
-        
+    def base_case(
+        self,
+        property: Union[str, List[str], None] = None,
+        filters: Union[Dict[str, Any], str, None] = None,
+    ) -> Case:
+        """Get the base case (row 0 of the base-case sheet) as a Case.
+
+        Args:
+            property: Optional property name (or list) to focus on. The
+                full set of volumes stays available via ``.properties()``.
+            filters: Optional spatial filter — a dict ({field: value(s)})
+                or a stored-filter name. When given, the returned Case's
+                volumes are summed only over matching segments.
+
+        Called with no arguments, the full (unfiltered) base case is
+        returned — identical to previous behaviour.
+
         Raises:
             ValueError: If base case sheet was not found during initialization
         """
@@ -3708,11 +3722,30 @@ class Dataset:
                 f"To fix: Create a sheet named '{self.base_case_parameter}' or specify a different "
                 f"base_case parameter when initializing Dataset."
             )
-        return self.case_manager.get_case(0, self.base_case_parameter)
-    
-    def ref_case(self) -> Case:
-        """Get reference case as a Case object.
-        
+        return self.case_manager.get_case(
+            0,
+            parameter=self.base_case_parameter,
+            filters=filters,
+            property=property,
+        )
+
+    def ref_case(
+        self,
+        property: Union[str, List[str], None] = None,
+        filters: Union[Dict[str, Any], str, None] = None,
+    ) -> Case:
+        """Get the reference case (row 1 of the base-case sheet) as a Case.
+
+        Args:
+            property: Optional property name (or list) to focus on. The
+                full set of volumes stays available via ``.properties()``.
+            filters: Optional spatial filter — a dict ({field: value(s)})
+                or a stored-filter name. When given, the returned Case's
+                volumes are summed only over matching segments.
+
+        Called with no arguments, the full (unfiltered) reference case is
+        returned — identical to previous behaviour.
+
         Raises:
             ValueError: If base case sheet was not found during initialization
         """
@@ -3723,7 +3756,12 @@ class Dataset:
                 f"To fix: Create a sheet named '{self.base_case_parameter}' or specify a different "
                 f"base_case parameter when initializing Dataset."
             )
-        return self.case_manager.get_case(1, self.base_case_parameter)
+        return self.case_manager.get_case(
+            1,
+            parameter=self.base_case_parameter,
+            filters=filters,
+            property=property,
+        )
 
     def extract_case(
         self,
@@ -4895,6 +4933,14 @@ class FilteredDataset:
             filters=self._filters,
             multiplier=multiplier,
         )
+
+    def base_case(self, property: Union[str, List[str], None] = None) -> Case:
+        """Base case under this view's filter (see :meth:`Dataset.base_case`)."""
+        return self._ds.base_case(property=property, filters=self._filters)
+
+    def ref_case(self, property: Union[str, List[str], None] = None) -> Case:
+        """Reference case under this view's filter (see :meth:`Dataset.ref_case`)."""
+        return self._ds.ref_case(property=property, filters=self._filters)
 
     def __repr__(self) -> str:
         title = self._filter_name if self._filter_name else "<inline>"
