@@ -328,7 +328,7 @@ def _draw_tornado(
                     ha='center', va='bottom', fontsize=s["reference_fontsize"],
                     color=s["reference_color"], zorder=4)
 
-    outer_bar_shadow = [patheffects.withSimplePatchShadow(offset=(1.5, -1.5), alpha=0.25)]
+    inner_bar_shadow = [patheffects.withSimplePatchShadow(offset=(1.5, -1.5), alpha=0.25)]
     white_text_outline = [patheffects.withStroke(linewidth=1.2, foreground='black', alpha=0.4)]
 
     def has_space_for_label(text, width_in_data_units, xspan):
@@ -347,33 +347,39 @@ def _draw_tornado(
         neg_outer_width = 0
         if low < base:
             neg_outer_width = min(high, base) - low
-            bar = ax.barh(i, neg_outer_width, left=low, height=s["bar_height"],
-                          color=no_color, alpha=no_alpha, zorder=1)
-            if s["show_bar_shadows"]:
-                bar[0].set_path_effects(outer_bar_shadow)
+            ax.barh(i, neg_outer_width, left=low, height=s["bar_height"],
+                    color=no_color, alpha=no_alpha, zorder=1)
 
         pos_outer_width = 0
         if high > base:
             pos_outer_width = high - max(low, base)
-            bar = ax.barh(i, pos_outer_width, left=max(low, base), height=s["bar_height"],
-                          color=po_color, alpha=po_alpha, zorder=1)
-            if s["show_bar_shadows"]:
-                bar[0].set_path_effects(outer_bar_shadow)
+            ax.barh(i, pos_outer_width, left=max(low, base), height=s["bar_height"],
+                    color=po_color, alpha=po_alpha, zorder=1)
 
         neg_inner_width = pos_inner_width = 0
+        inner_patches = []
         if p90p10:
             p90, p10 = p90p10
             if p90 < base:
                 neg_inner_width = min(p10, base) - p90
-                ax.barh(i, neg_inner_width, left=p90, height=s["bar_height"],
-                        color=ni_color, alpha=ni_alpha, zorder=2)
+                ib = ax.barh(i, neg_inner_width, left=p90, height=s["bar_height"],
+                             color=ni_color, alpha=ni_alpha, zorder=2)
+                inner_patches.append(ib[0])
             if p10 > base:
                 pos_inner_width = p10 - max(p90, base)
-                ax.barh(i, pos_inner_width, left=max(p90, base), height=s["bar_height"],
-                        color=pi_color, alpha=pi_alpha, zorder=2)
+                ib = ax.barh(i, pos_inner_width, left=max(p90, base), height=s["bar_height"],
+                             color=pi_color, alpha=pi_alpha, zorder=2)
+                inner_patches.append(ib[0])
 
-        ax.barh(i, high - low, left=low, height=s["bar_height"], facecolor="none",
-                edgecolor=s["outline_color"], linewidth=s["bar_linewidth"], zorder=3)
+        # Outline on top — its rectangle also clips the inner-bar shadows so
+        # they stay contained within the bar and never spill past the outline.
+        outline = ax.barh(i, high - low, left=low, height=s["bar_height"],
+                          facecolor="none", edgecolor=s["outline_color"],
+                          linewidth=s["bar_linewidth"], zorder=3)
+        if s["show_bar_shadows"]:
+            for ib in inner_patches:
+                ib.set_path_effects(inner_bar_shadow)
+                ib.set_clip_path(outline[0])
 
         # --- Value labels with automatic space checking ---
         pad = s["value_offset"] * xspan
