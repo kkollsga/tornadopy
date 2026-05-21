@@ -598,7 +598,7 @@ def tornado_plot(
         m_left = 1.25 + (0.34 if has_row_headers else 0.0)   # param labels(+row hdr)
         m_right = 0.35
         m_bottom = 0.62
-        m_top = 0.55 + (0.72 if has_col_headers else 0.0)    # fig title(+col hdr)
+        m_top = 0.97 + (0.30 if has_col_headers else 0.0)    # fig title + subtitle(+col hdr)
 
         left = m_left / fig_w
         right = 1.0 - m_right / fig_w

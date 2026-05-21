@@ -33,7 +33,7 @@ def _build_settings(settings: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         "bar_linewidth": 1.2,
         "cumulative_linewidth": 2.5,
         "reference_width": 2.0,
-        "reference_linestyle": "--",
+        "reference_linestyle": "-",
         # Font sizes
         "title_fontsize": 15,
         "subtitle_fontsize": 11,
@@ -122,6 +122,7 @@ def _draw_distribution(
     clip_min: Optional[float],
     clip_max: Optional[float],
     reference_case: Optional[float],
+    reference_label: str,
     target_bins: int,
     bin_number: Optional[int],
     bin_start: Optional[float],
@@ -182,9 +183,15 @@ def _draw_distribution(
     property_name = dist_meta.get("property", "Value")
     unit_str = f" {unit}" if unit else ""
 
-    # --- Per-cell subtitle ---
-    stats_str = f"P90: {p90:.2f}   P50: {p50:.2f}   P10: {p10:.2f}{unit_str}"
-    subtitle = f"{subtitle_prefix}  |  {stats_str}" if subtitle_prefix else stats_str
+    # --- Per-cell subtitle: [prefix |] [Ref case: x |] P90 .. P50 .. P10 .. ---
+    p_stats = f"P90: {p90:.2f}   P50: {p50:.2f}   P10: {p10:.2f}{unit_str}"
+    parts = []
+    if subtitle_prefix:
+        parts.append(str(subtitle_prefix))
+    if reference_case is not None:
+        parts.append(f"{reference_label}: {reference_case:.2f}")
+    parts.append(p_stats)
+    subtitle = "  |  ".join(parts)
     ax.set_title(
         subtitle, fontsize=s["subtitle_fontsize"], color=s["text_color"],
         alpha=0.85, pad=s["cell_subtitle_pad"],
@@ -239,14 +246,10 @@ def _draw_distribution(
         ax.grid(axis='x', which='minor', alpha=s["minor_grid_alpha"],
                 color=s["grid_color"], linewidth=s["minor_grid_linewidth"], zorder=1)
 
-    # --- Reference case line ---
+    # --- Reference case line (drawn below the bars; value shown in subtitle) ---
     if reference_case is not None:
         ax.axvline(reference_case, color=s["reference_color"], lw=s["reference_width"],
-                   linestyle=s["reference_linestyle"], zorder=3.5, alpha=0.7)
-        ymax = ax.get_ylim()[1]
-        ax.text(reference_case, ymax * 1.03, 'Ref case',
-                ha='center', va='top', fontsize=s["reference_fontsize"],
-                color=s["reference_color"], zorder=4)
+                   linestyle=s["reference_linestyle"], zorder=1.5)
 
     # --- Cumulative curve (% with higher value) ---
     sorted_data = np.sort(distribution_data)
@@ -319,6 +322,7 @@ def distribution_plot(
     target_bins: int = 20,
     color: Union[str, List[str]] = "blue",
     reference_case: Optional[float] = None,
+    reference_label: str = "Ref case",
     figsize: Optional[Tuple[float, float]] = None,
     settings: Optional[Dict[str, Any]] = None,
     bin_number: Optional[int] = None,
@@ -361,7 +365,12 @@ def distribution_plot(
                   percentiles, bins and the cumulative curve are computed.
                   In display units (same as the x-axis).
         clip_max: Optional upper bound, applied the same way as clip_min.
-        title, unit, outfile, target_bins, reference_case, figsize,
+        reference_case: Optional reference value. Shown in the subtitle
+                  ("``{reference_label}: {value}``", left of the P90/P50/P10
+                  values) and marked with a vertical line drawn below the bars.
+        reference_label: Label for the reference value — e.g. "Ref case"
+                  (default) or "Base case".
+        title, unit, outfile, target_bins, figsize,
         settings, bin_number, bin_start, bin_end: Plot styling — same as before.
 
     Returns:
@@ -420,7 +429,7 @@ def distribution_plot(
         m_left = 0.66 + (0.34 if has_row_headers else 0.0)   # ylabel+ticks(+row hdr)
         m_right = 0.86                                        # cumulative ticks+label
         m_bottom = 0.60                                       # xlabel + ticks
-        m_top = 0.52 + (0.55 if has_col_headers else 0.0)     # fig title(+col hdr)
+        m_top = 0.86 + (0.21 if has_col_headers else 0.0)     # fig title + subtitle(+col hdr)
 
         left = m_left / fig_w
         right = 1.0 - m_right / fig_w
@@ -458,6 +467,7 @@ def distribution_plot(
             _draw_distribution(
                 ax, dist_meta, s,
                 clip_min=clip_min, clip_max=clip_max, reference_case=reference_case,
+                reference_label=reference_label,
                 target_bins=target_bins, bin_number=bin_number,
                 bin_start=bin_start, bin_end=bin_end, unit_override=unit,
                 subtitle_prefix=None if is_grid else filter_name,
