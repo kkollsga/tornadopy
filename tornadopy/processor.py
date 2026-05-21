@@ -1311,15 +1311,14 @@ class Case:
     ) -> None:
         """Print filtered results without modifying the case."""
         filters = self._processor.filter_manager.resolve_filter_preset(filter_name)
-        
-        if property is not None:
-            filters = filters.copy()
-            filters['property'] = property
-        
+
+        # property goes to get_case as its own kwarg — merging it into the
+        # filters dict trips the reserved-key validation in get_case.
         filtered_case = self._processor.case_manager.get_case(
             self.idx,
             parameter=self.tornado_parameter,
             filters=filters,
+            property=property,
             as_dict=True
         )
         
@@ -1354,7 +1353,10 @@ class Case:
                 for prop_name, val in flat_props[:15]:
                     base_prop = prop_name.split('.')[-1]
                     unit = self._processor.unit_manager.get_display_unit(base_prop)
-                    lines.append(f"  {prop_name:.<35} {val:>12,.2f} {unit}")
+                    display_val = self._processor.unit_manager.format_for_display(
+                        base_prop, val, decimals=2
+                    )
+                    lines.append(f"  {prop_name:.<35} {display_val:>12,.2f} {unit}")
                 
                 if len(flat_props) > 15:
                     lines.append(f"  ... {len(flat_props) - 15} more properties")
@@ -1858,11 +1860,14 @@ class CaseManager:
                         validate_finite=False
                     )
                     if index < len(values):
-                        raw_value = values[index]
-                        display_value = self.unit_manager.format_for_display(
-                            prop, raw_value, decimals, override_multiplier
+                        # Store raw (base-unit) values so a filtered Case
+                        # matches the unfiltered path (parse_case_to_hierarchy).
+                        # Display formatting is applied by the consumer
+                        # (Case.__str__, .parameters(), ...) — storing
+                        # display units here double-applies the multiplier.
+                        properties_dict[prop] = self.unit_manager._to_float(
+                            values[index], decimals
                         )
-                        properties_dict[prop] = display_value
                 except:
                     pass
             
@@ -3697,17 +3702,18 @@ class Dataset:
     
     def base_case(
         self,
-        property: Union[str, List[str], None] = None,
         filters: Union[Dict[str, Any], str, None] = None,
+        property: Union[str, List[str], None] = None,
     ) -> Case:
         """Get the base case (row 0 of the base-case sheet) as a Case.
 
         Args:
-            property: Optional property name (or list) to focus on. The
-                full set of volumes stays available via ``.properties()``.
             filters: Optional spatial filter — a dict ({field: value(s)})
                 or a stored-filter name. When given, the returned Case's
-                volumes are summed only over matching segments.
+                volumes are summed only over matching segments. This is
+                the first positional argument: ``base_case("north")``.
+            property: Optional property name (or list) to focus on. The
+                full set of volumes stays available via ``.properties()``.
 
         Called with no arguments, the full (unfiltered) base case is
         returned — identical to previous behaviour.
@@ -3731,17 +3737,18 @@ class Dataset:
 
     def ref_case(
         self,
-        property: Union[str, List[str], None] = None,
         filters: Union[Dict[str, Any], str, None] = None,
+        property: Union[str, List[str], None] = None,
     ) -> Case:
         """Get the reference case (row 1 of the base-case sheet) as a Case.
 
         Args:
-            property: Optional property name (or list) to focus on. The
-                full set of volumes stays available via ``.properties()``.
             filters: Optional spatial filter — a dict ({field: value(s)})
                 or a stored-filter name. When given, the returned Case's
-                volumes are summed only over matching segments.
+                volumes are summed only over matching segments. This is
+                the first positional argument: ``ref_case("north")``.
+            property: Optional property name (or list) to focus on. The
+                full set of volumes stays available via ``.properties()``.
 
         Called with no arguments, the full (unfiltered) reference case is
         returned — identical to previous behaviour.

@@ -120,22 +120,25 @@ inherently across all sheets.
 ## Base / reference cases
 
 ```python
-ds.base_case()                          # full (unfiltered) base case as a Case
-ds.base_case(filters="north")           # volumes summed over the 'north' segments
-ds.base_case("stoiip", filters="north") # focus on one property
-ds.ref_case("stoiip", filters="north")  # same, for the reference case
+ds.base_case()                      # full (unfiltered) base case as a Case
+ds.base_case("north")               # volumes summed over the 'north' segments
+ds.base_case("north", "stoiip")     # filter, then focus one property
+ds.ref_case("north", "stoiip")      # same, for the reference case
 
-bc = ds.base_case(filters="north")
-bc.properties()                         # {'stoiip': ..., 'giip': ...}
-bc["stoiip"]                            # a single volume
+bc = ds.base_case("north")
+bc.properties()                     # raw m³ volumes — {'stoiip': ..., 'giip': ...}
+bc["stoiip"]                        # a single volume (raw m³)
+print(bc)                           # formatted for display (mcm/bcm)
 
-ds.filter("north").base_case()          # a FilteredDataset applies its filter
+ds.filter("north").base_case()      # a FilteredDataset applies its own filter
 ```
 
-Both `property` and `filters` are optional — called bare, `base_case()` /
-`ref_case()` return the full unfiltered case. The base / reference sheet is set
-at construction time (`base_case="Base_case"` by default). Row 0 = base;
-row 1 = reference.
+Signature is `base_case(filters=None, property=None)` — `filters` is the first
+positional argument (a dict or stored-preset name); `property` is optional.
+Called bare, `base_case()` / `ref_case()` return the full unfiltered case.
+`.properties()` always returns raw m³ (filtered or not); `print()` applies
+display units. The base / reference sheet is set at construction time
+(`base_case="Base_case"` by default). Row 0 = base; row 1 = reference.
 
 ## Extracting a case by percentile
 
