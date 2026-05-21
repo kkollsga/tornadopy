@@ -5,6 +5,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union, TYPE_CHECKING
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.ticker import AutoMinorLocator, MultipleLocator
+from matplotlib.offsetbox import TextArea, HPacker, AnnotationBbox
 
 from .processor import Dataset, FilteredDataset
 from ._colors import _PALETTE, _DEFAULT_SHADE_IDX, _resolve_color, _cell_color, _gap_fraction
@@ -64,6 +65,7 @@ def _build_settings(settings: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         "grid_col_gap": 0.95,        # inches of blank space between columns
         "grid_row_gap": 0.58,        # inches of blank space between rows
         "cell_subtitle_pad": 5.0,
+        "subtitle_label_shrink": 2.0,  # points: how much smaller the labels are
         # Percentile markers
         "show_percentile_markers": True,
         "marker_size": 8,
@@ -112,6 +114,30 @@ def _beautiful_bins(data, target_bins, manual_start=None, manual_end=None):
         np.ceil(data_max / beautiful_width) * beautiful_width
     )
     return np.arange(bin_start, bin_end + beautiful_width, beautiful_width)
+
+
+def _place_subtitle(ax: "Axes", segments, s: Dict[str, Any]) -> None:
+    """Render a centred subtitle above ``ax`` from per-segment (text, size) pairs.
+
+    Mixed font sizes in one line — used so the labels can be smaller than the
+    numbers. Replaces ``ax.set_title`` (which is single-size).
+    """
+    children = [
+        TextArea(text, textprops=dict(
+            fontsize=fs, color=s["text_color"], alpha=0.85,
+        ))
+        for text, fs in segments if text
+    ]
+    if not children:
+        return
+    box = HPacker(children=children, align="baseline", sep=0, pad=0)
+    ab = AnnotationBbox(
+        box, (0.5, 1.0), xycoords="axes fraction",
+        xybox=(0.0, s["cell_subtitle_pad"]), boxcoords="offset points",
+        box_alignment=(0.5, 0.0), frameon=False, pad=0.0,
+        annotation_clip=False, zorder=5,
+    )
+    ax.add_artist(ab)
 
 
 def _draw_distribution(
@@ -184,18 +210,24 @@ def _draw_distribution(
     unit_str = f" {unit}" if unit else ""
 
     # --- Per-cell subtitle: [prefix |] [Ref case: x |] P90 .. P50 .. P10 .. ---
-    p_stats = f"P90: {p90:.2f}   P50: {p50:.2f}   P10: {p10:.2f}{unit_str}"
-    parts = []
+    # Built as sized segments — the labels (Ref case / P90 / P50 / P10) are
+    # rendered slightly smaller than the numbers.
+    big = s["subtitle_fontsize"]
+    small = max(6.0, big - s["subtitle_label_shrink"])
+    sep = "   |   "
+    segments: List[Tuple[str, float]] = []
     if subtitle_prefix:
-        parts.append(str(subtitle_prefix))
+        segments.append((f"{subtitle_prefix}{sep}", big))
     if reference_case is not None:
-        parts.append(f"{reference_label}: {reference_case:.2f}")
-    parts.append(p_stats)
-    subtitle = "  |  ".join(parts)
-    ax.set_title(
-        subtitle, fontsize=s["subtitle_fontsize"], color=s["text_color"],
-        alpha=0.85, pad=s["cell_subtitle_pad"],
-    )
+        segments.append((f"{reference_label}: ", small))
+        segments.append((f"{reference_case:.2f}{sep}", big))
+    segments.append(("P90: ", small))
+    segments.append((f"{p90:.2f}   ", big))
+    segments.append(("P50: ", small))
+    segments.append((f"{p50:.2f}   ", big))
+    segments.append(("P10: ", small))
+    segments.append((f"{p10:.2f}{unit_str}", big))
+    _place_subtitle(ax, segments, s)
 
     # --- Bins ---
     if bin_number is not None:
@@ -321,7 +353,7 @@ def distribution_plot(
     outfile: Optional[Union[str, Path]] = None,
     target_bins: int = 20,
     color: Union[str, List[str]] = "blue",
-    reference_case: Union[float, str, None] = None,
+    reference_case: Union[float, str, None] = "auto",
     reference_label: Optional[str] = None,
     figsize: Optional[Tuple[float, float]] = None,
     settings: Optional[Dict[str, Any]] = None,
@@ -365,15 +397,17 @@ def distribution_plot(
                   percentiles, bins and the cumulative curve are computed.
                   In display units (same as the x-axis).
         clip_max: Optional upper bound, applied the same way as clip_min.
-        reference_case: Optional reference value. A number is used as-is.
-                  ``"ref"`` or ``"base"`` auto-detects the reference / base
-                  case from the dataset's base-case sheet (per cell — using
-                  that cell's property and filter). Either way the value is
-                  shown in the subtitle ("``{reference_label}: {value}``", left
-                  of the P90/P50/P10 values) and marked with a vertical line
-                  drawn below the bars. ``None`` (default) draws nothing.
+        reference_case: Reference value to mark. Default ``"auto"`` — the
+                  base case is auto-detected from the dataset's base-case
+                  sheet (per cell, using that cell's property and filter) and
+                  marked; quietly skipped if the base-case sheet is missing.
+                  ``"base"`` / ``"ref"`` force the base / reference case (and
+                  warn if it can't be resolved); a number is used literally;
+                  ``None`` draws nothing. The value is shown in the subtitle
+                  ("``{reference_label}: {value}``", left of the P90/P50/P10
+                  values) and marked with a vertical line below the bars.
         reference_label: Label for the reference value. Defaults to
-                  "Base case" when ``reference_case="base"``, else "Ref case".
+                  "Base case" for ``"auto"``/``"base"``, else "Ref case".
         title, unit, outfile, target_bins, figsize,
         settings, bin_number, bin_start, bin_end: Plot styling — same as before.
 
@@ -409,11 +443,8 @@ def distribution_plot(
 
     # Resolve the reference label (default depends on which case is shown).
     if reference_label is None:
-        reference_label = (
-            "Base case"
-            if isinstance(reference_case, str) and reference_case.strip().lower() == "base"
-            else "Ref case"
-        )
+        _rc = reference_case.strip().lower() if isinstance(reference_case, str) else ""
+        reference_label = "Base case" if _rc in ("auto", "base") else "Ref case"
 
     # --- Figure sizing ---
     if figsize is not None:
@@ -565,10 +596,10 @@ def _resolve_reference(
 ) -> Optional[float]:
     """Resolve a ``reference_case`` spec to a numeric value in display units.
 
-    A number is returned as-is. ``'base'`` / ``'ref'`` auto-detect the base
-    (row 0) / reference (row 1) case from the dataset's base-case sheet, for
-    this property and filter. Returns ``None`` (with a warning) when an
-    auto-detect is requested but unavailable.
+    A number is returned as-is. ``'auto'`` (the default) and ``'base'`` /
+    ``'ref'`` auto-detect the base (row 0) / reference (row 1) case from the
+    dataset's base-case sheet, for this property and filter. ``'auto'`` is
+    quiet when unavailable; an explicit ``'base'``/``'ref'`` warns.
     """
     if ref_spec is None:
         return None
@@ -576,25 +607,26 @@ def _resolve_reference(
         return float(ref_spec)
 
     key = str(ref_spec).strip().lower()
-    if key in ("ref", "reference"):
-        case_type = "reference"
+    if key == "auto":
+        row_idx, quiet = 0, True       # auto -> base case, quietly
     elif key == "base":
-        case_type = "base"
+        row_idx, quiet = 0, False
+    elif key in ("ref", "reference"):
+        row_idx, quiet = 1, False
     else:
         raise ValueError(
-            "reference_case must be a number, 'base', 'ref', or None — "
+            "reference_case must be a number, 'auto', 'base', 'ref', or None — "
             f"got {ref_spec!r}."
         )
 
-    row_idx = 0 if case_type == "base" else 1  # base-case sheet: row 0 base, row 1 ref
-
     base_sheet = ds.base_case_parameter
     if base_sheet not in ds.parameters():
-        warnings.warn(
-            f"distribution_plot: reference_case={ref_spec!r} requested, but the "
-            f"base-case sheet '{base_sheet}' is not loaded — no reference line.",
-            stacklevel=3,
-        )
+        if not quiet:
+            warnings.warn(
+                f"distribution_plot: reference_case={ref_spec!r} requested, but the "
+                f"base-case sheet '{base_sheet}' is not loaded — no reference line.",
+                stacklevel=3,
+            )
         return None
     try:
         # Same extraction path the distribution itself uses, so the value
@@ -611,11 +643,12 @@ def _resolve_reference(
             prop, values[row_idx], decimals=6, override_multiplier=multiplier
         )
     except Exception as e:
-        warnings.warn(
-            f"distribution_plot: could not resolve reference_case={ref_spec!r} "
-            f"for '{prop}': {e} — no reference line.",
-            stacklevel=3,
-        )
+        if not quiet:
+            warnings.warn(
+                f"distribution_plot: could not resolve reference_case={ref_spec!r} "
+                f"for '{prop}': {e} — no reference line.",
+                stacklevel=3,
+            )
         return None
 
 
