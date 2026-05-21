@@ -157,11 +157,15 @@ figure auto-sizes to the grid; pass `figsize=(w, h)` for an explicit total size,
 or tune the `settings` keys `grid_cell_width` / `grid_cell_height` /
 `grid_col_gap` / `grid_row_gap` (the gaps are in inches).
 
-`distribution_plot`'s `color` accepts a **flat list** (one colour per row,
-cycled) or a **nested list** indexed `color[row][col]` to colour every cell
-individually. Each entry is a scheme name (`blue`, `red`, `green`, `orange`,
-`purple`, `fuchsia`, `yellow`) or any literal matplotlib colour (hex / CSS
-name) — e.g. `color=[["red", "blue"], ["green", "cyan"]]` for a 2×2 grid.
+`distribution_plot`'s `color` draws from a 17-family Tailwind-style palette:
+`slate`, `zinc`, `stone`, `red`, `orange`, `amber`, `yellow`, `lime`, `green`,
+`emerald`, `cyan`, `sky`, `blue`, `violet`, `purple`, `fuchsia`, `rose`. A
+colour spec is a family name (`"blue"` — default shade 400), optionally a
+shade (`"red-50"` — shades 50–950), and optionally an opacity suffix
+(`"red-50:80"` = 80% opaque). Any literal matplotlib colour (hex, or a CSS
+name like `"teal"`) also works. Pass a **flat list** for one colour per row,
+or a **nested list** `color[row][col]` for per-cell colours — e.g.
+`color=[["red-50", "blue"], ["green", "teal"]]`.
 
 Single-plot mode still returns `(fig, ax, saved)`; in grid mode `ax` is the 2-D
 array of axes. A row's label comes from a stored-preset name, a `title` key in
