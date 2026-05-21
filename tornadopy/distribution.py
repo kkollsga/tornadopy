@@ -4,6 +4,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union, TYPE_CHECKING
 
 import numpy as np
 import matplotlib.pyplot as plt
+import matplotlib.colors as mcolors
 from matplotlib.ticker import AutoMinorLocator, MultipleLocator
 
 from .processor import Dataset, FilteredDataset
@@ -25,20 +26,32 @@ _COLOR_MAP = {
 }
 
 
-def _build_settings(color: str, settings: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-    """Assemble the settings dict, resolving the colour scheme."""
-    if color not in _COLOR_MAP:
-        color = "blue"
-    colors = _COLOR_MAP[color]
+def _resolve_color(c: Any) -> Tuple[Any, Any]:
+    """Resolve a colour spec to a (fill, outline) pair.
 
+    Accepts a named scheme key ('blue', 'red', ...) or any literal
+    matplotlib colour (hex, CSS name); literals get a darkened outline.
+    """
+    if isinstance(c, str) and c in _COLOR_MAP:
+        return _COLOR_MAP[c]["light"], _COLOR_MAP[c]["dark"]
+    try:
+        rgb = mcolors.to_rgb(c)
+        return c, tuple(ch * 0.6 for ch in rgb)
+    except (ValueError, TypeError):
+        return _COLOR_MAP["blue"]["light"], _COLOR_MAP["blue"]["dark"]
+
+
+def _build_settings(settings: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Assemble the settings dict (default colour scheme; per-row colours
+    are applied later by distribution_plot)."""
     s = {
         "figsize": (10, 6),
         "dpi": 160,
         "plot_bg_color": "#FAF0E6",
         "figure_bg_color": "white",
         # Colors
-        "bar_color": colors["light"],
-        "bar_outline_color": colors["dark"],
+        "bar_color": _COLOR_MAP["blue"]["light"],
+        "bar_outline_color": _COLOR_MAP["blue"]["dark"],
         "cumulative_color": "#BA2A19",  # dark red
         "text_color": "#000000",  # black
         "outline_color": "#000000",  # black
@@ -145,11 +158,17 @@ def _draw_distribution(
     show_xlabel: bool,
     show_ylabel: bool,
     show_cumulative_label: bool,
+    bar_color: Optional[Any] = None,
+    bar_outline_color: Optional[Any] = None,
 ) -> Dict[str, float]:
     """Render one distribution histogram + cumulative curve onto ``ax``.
 
     Creates its own secondary axis. Returns the {p10, p50, p90} percentiles.
     """
+    bar_color = bar_color if bar_color is not None else s["bar_color"]
+    bar_outline_color = (
+        bar_outline_color if bar_outline_color is not None else s["bar_outline_color"]
+    )
     distribution_data = np.asarray(dist_meta["data"], dtype=np.float64)
     distribution_data = distribution_data[np.isfinite(distribution_data)]
     if len(distribution_data) == 0:
@@ -209,7 +228,7 @@ def _draw_distribution(
     # --- Histogram (no gaps) ---
     ax.hist(
         distribution_data, bins=bins,
-        color=s["bar_color"], edgecolor=s["bar_outline_color"],
+        color=bar_color, edgecolor=bar_outline_color,
         linewidth=s["bar_linewidth"], alpha=0.9, zorder=2,
     )
 
@@ -313,7 +332,7 @@ def _draw_distribution(
 
 
 def distribution_plot(
-    ds: Union[Dataset, FilteredDataset],
+    ds: Union[Dataset, FilteredDataset, List[Union[Dataset, FilteredDataset]]],
     *,
     property: Union[str, List[str]],
     parameter: Optional[str] = None,
@@ -323,7 +342,7 @@ def distribution_plot(
     unit: Optional[str] = None,
     outfile: Optional[Union[str, Path]] = None,
     target_bins: int = 20,
-    color: str = "blue",
+    color: Union[str, List[str]] = "blue",
     reference_case: Optional[float] = None,
     figsize: Optional[Tuple[float, float]] = None,
     settings: Optional[Dict[str, Any]] = None,
@@ -336,26 +355,33 @@ def distribution_plot(
     """
     Distribution histogram (with cumulative curve) for one property of one parameter.
 
-    Grid mode: pass a list for ``property`` and/or ``filters`` to render a grid
-    of subplots — properties stack across columns, filters stack down rows. A
-    scalar ``property`` and scalar ``filters`` produce a single plot as before.
+    Grid mode: pass a list for ``property`` and/or ``filters`` (or a list of
+    datasets/views as ``ds``) to render a grid of subplots — properties stack
+    across columns, rows stack down. A scalar ``property`` with a single
+    dataset/filter produces a single plot as before.
 
     Args:
-        ds: Dataset.
+        ds: A Dataset, a FilteredDataset, or a **list** of either — one grid
+            row per list entry. Each FilteredDataset in the list contributes
+            its own filter as that row's selection.
         property: Property to plot (e.g. 'stoiip'), or a list of properties —
                   one column per property.
         parameter: Sheet name. Defaults to the first sheet — a warning is printed
                    when defaulted.
         filters: Spatial filter dict ({field: value(s)}) or stored-filter name.
                  Must not contain a 'property' key. A list of filters renders one
-                 row per filter. (A FilteredDataset cannot be combined with a
-                 filter list — pass a plain Dataset for filter grids.)
+                 row per filter. Must be None when ``ds`` is a list (each entry
+                 carries its own filter).
         multiplier: Optional display multiplier override.
+        color: A colour scheme name ('blue', 'red', 'green', 'orange', 'purple',
+               'fuchsia', 'yellow') or any literal matplotlib colour. Pass a
+               **list** to colour each grid row differently (cycled if shorter
+               than the row count).
         clip_min: Optional lower bound. Cases below it are dropped before
                   percentiles, bins and the cumulative curve are computed.
                   In display units (same as the x-axis).
         clip_max: Optional upper bound, applied the same way as clip_min.
-        title, unit, outfile, target_bins, color, reference_case, figsize,
+        title, unit, outfile, target_bins, reference_case, figsize,
         settings, bin_number, bin_start, bin_end: Plot styling — same as before.
 
     Returns:
@@ -363,38 +389,20 @@ def distribution_plot(
         grid mode where ``axes_2d`` is a 2-D numpy array of Axes indexed
         ``[row][column]``.
     """
-    # --- Resolve a FilteredDataset to (Dataset, filters) ---
-    if isinstance(ds, FilteredDataset):
-        if filters is not None:
-            raise ValueError(
-                "distribution_plot received both a FilteredDataset (which "
-                "already carries a filter) and a filters= argument. Pick one."
-            )
-        view_filters = dict(ds.filters) if ds.filters else {}
-        if ds.title:
-            view_filters['title'] = ds.title
-        filters = view_filters or None
-        ds = ds.dataset
+    # --- Resolve ds + filters into per-row (Dataset, filter) pairs ---
+    datasets, row_filters = _resolve_rows(ds, filters)
 
-    if not isinstance(ds, Dataset):
-        raise TypeError(
-            "distribution_plot expects a Dataset or FilteredDataset as first "
-            f"argument. Got {type(ds).__name__}."
-        )
+    # --- Normalise property to a list; detect grid mode ---
+    properties = list(property) if isinstance(property, list) else [property]
+    if not properties:
+        raise ValueError("distribution_plot: 'property' list must be non-empty.")
 
-    # --- Normalise property / filters to lists; detect grid mode ---
-    prop_is_list = isinstance(property, list)
-    filt_is_list = isinstance(filters, list)
-    properties = list(property) if prop_is_list else [property]
-    filter_list = list(filters) if filt_is_list else [filters]
-    is_grid = prop_is_list or filt_is_list
+    nrows, ncols = len(datasets), len(properties)
+    is_grid = nrows > 1 or ncols > 1
 
-    if not properties or not filter_list:
-        raise ValueError("distribution_plot: 'property' and 'filters' lists must be non-empty.")
-
-    # --- Resolve parameter ---
+    # --- Resolve parameter against the first row's dataset ---
     if parameter is None:
-        params = ds.parameters()
+        params = datasets[0].parameters()
         if not params:
             raise ValueError("Dataset has no parameters.")
         parameter = params[0]
@@ -404,9 +412,8 @@ def distribution_plot(
             stacklevel=2,
         )
 
-    s = _build_settings(color, settings)
-
-    nrows, ncols = len(filter_list), len(properties)
+    s = _build_settings(settings)
+    color_list = list(color) if isinstance(color, list) else [color]
 
     # --- Figure sizing ---
     if figsize is not None:
@@ -439,10 +446,11 @@ def distribution_plot(
     col_labels: List[str] = []
     row_labels: List[str] = []
     for c, prop in enumerate(properties):
-        for r, flt in enumerate(filter_list):
+        for r in range(nrows):
             ax = axes[r][c]
-            dist_meta = ds._distribution_data(
-                parameter=parameter, property=prop, filters=flt, multiplier=multiplier,
+            dist_meta = datasets[r]._distribution_data(
+                parameter=parameter, property=prop,
+                filters=row_filters[r], multiplier=multiplier,
             )
             if isinstance(dist_meta, dict) and 'data' not in dist_meta:
                 raise ValueError(
@@ -452,6 +460,7 @@ def distribution_plot(
             # In grid mode the filter name is the row header, so it is not
             # repeated in the per-cell subtitle.
             filter_name = dist_meta.get('filter_name')
+            fill, outline = _resolve_color(color_list[r % len(color_list)])
             _draw_distribution(
                 ax, dist_meta, s,
                 clip_min=clip_min, clip_max=clip_max, reference_case=reference_case,
@@ -461,6 +470,7 @@ def distribution_plot(
                 show_xlabel=(r == nrows - 1),
                 show_ylabel=(c == 0),
                 show_cumulative_label=(c == ncols - 1),
+                bar_color=fill, bar_outline_color=outline,
             )
             if r == 0:
                 pn = dist_meta.get('property', prop) or prop
@@ -469,12 +479,12 @@ def distribution_plot(
                     else str(pn).title()
                 )
             if c == 0:
-                row_labels.append(_filter_label(ds, flt, dist_meta, r))
+                row_labels.append(_filter_label(row_filters[r], dist_meta, r))
 
     # --- Figure title ---
     if title is None:
-        first = ds._distribution_data(parameter=parameter, property=properties[0],
-                                      filters=filter_list[0], multiplier=multiplier)
+        first = datasets[0]._distribution_data(parameter=parameter, property=properties[0],
+                                               filters=row_filters[0], multiplier=multiplier)
         title = first.get('title', 'Distribution') if isinstance(first, dict) else 'Distribution'
     fig.text(0.5, 0.975, title, ha="center", va="top",
              fontsize=s["title_fontsize"], fontweight="bold", color=s["text_color"])
@@ -504,7 +514,7 @@ def distribution_plot(
     return fig, (axes if is_grid else axes[0][0]), saved
 
 
-def _filter_label(ds: Dataset, flt: Any, dist_meta: Dict[str, Any], row_idx: int) -> str:
+def _filter_label(flt: Any, dist_meta: Dict[str, Any], row_idx: int) -> str:
     """Best-effort human label for a filter, used as a grid row header."""
     name = dist_meta.get('filter_name')
     if name:
@@ -523,3 +533,59 @@ def _filter_label(ds: Dataset, flt: Any, dist_meta: Dict[str, Any], row_idx: int
         if parts:
             return ", ".join(parts)
     return f"Filter {row_idx + 1}"
+
+
+def _resolve_entry(entry: Any) -> Tuple[Dataset, Optional[Dict[str, Any]]]:
+    """Resolve one ds entry to (Dataset, filter-or-None)."""
+    if isinstance(entry, FilteredDataset):
+        view_filters = dict(entry.filters) if entry.filters else {}
+        if entry.title:
+            view_filters['title'] = entry.title
+        return entry.dataset, (view_filters or None)
+    if isinstance(entry, Dataset):
+        return entry, None
+    raise TypeError(
+        "distribution_plot expects a Dataset, a FilteredDataset, or a list of "
+        f"them as the first argument. Got {type(entry).__name__}."
+    )
+
+
+def _resolve_rows(
+    ds: Any,
+    filters: Any,
+) -> Tuple[List[Dataset], List[Optional[Dict[str, Any]]]]:
+    """Resolve the ds + filters arguments into per-row (Dataset, filter) pairs."""
+    if isinstance(ds, list):
+        if not ds:
+            raise ValueError("distribution_plot: 'ds' list is empty.")
+        if filters is not None:
+            raise ValueError(
+                "distribution_plot: when 'ds' is a list, 'filters' must be None "
+                "— each entry carries its own filter."
+            )
+        datasets, row_filters = [], []
+        for entry in ds:
+            d, f = _resolve_entry(entry)
+            datasets.append(d)
+            row_filters.append(f)
+        return datasets, row_filters
+
+    if isinstance(ds, FilteredDataset):
+        if filters is not None:
+            raise ValueError(
+                "distribution_plot received both a FilteredDataset (which "
+                "already carries a filter) and a filters= argument. Pick one."
+            )
+        d, f = _resolve_entry(ds)
+        return [d], [f]
+
+    if isinstance(ds, Dataset):
+        filter_list = list(filters) if isinstance(filters, list) else [filters]
+        if not filter_list:
+            raise ValueError("distribution_plot: 'filters' list must be non-empty.")
+        return [ds] * len(filter_list), filter_list
+
+    raise TypeError(
+        "distribution_plot expects a Dataset, a FilteredDataset, or a list of "
+        f"them as the first argument. Got {type(ds).__name__}."
+    )

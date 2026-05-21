@@ -92,6 +92,62 @@ def _filter_label(flt: Any, idx: int) -> str:
     return f"Filter {idx + 1}"
 
 
+def _resolve_entry(entry: Any) -> Tuple[Dataset, Optional[Dict[str, Any]]]:
+    """Resolve one ds entry to (Dataset, filter-or-None)."""
+    if isinstance(entry, FilteredDataset):
+        view_filters = dict(entry.filters) if entry.filters else {}
+        if entry.title:
+            view_filters['title'] = entry.title
+        return entry.dataset, (view_filters or None)
+    if isinstance(entry, Dataset):
+        return entry, None
+    raise TypeError(
+        "tornado_plot expects a Dataset, a FilteredDataset, or a list of them "
+        f"as the first argument. Got {type(entry).__name__}."
+    )
+
+
+def _resolve_rows(
+    ds: Any,
+    filters: Any,
+) -> Tuple[List[Dataset], List[Optional[Dict[str, Any]]]]:
+    """Resolve the ds + filters arguments into per-row (Dataset, filter) pairs."""
+    if isinstance(ds, list):
+        if not ds:
+            raise ValueError("tornado_plot: 'ds' list is empty.")
+        if filters is not None:
+            raise ValueError(
+                "tornado_plot: when 'ds' is a list, 'filters' must be None "
+                "— each entry carries its own filter."
+            )
+        datasets, row_filters = [], []
+        for entry in ds:
+            d, f = _resolve_entry(entry)
+            datasets.append(d)
+            row_filters.append(f)
+        return datasets, row_filters
+
+    if isinstance(ds, FilteredDataset):
+        if filters is not None:
+            raise ValueError(
+                "tornado_plot received both a FilteredDataset (which already "
+                "carries a filter) and a filters= argument. Pick one."
+            )
+        d, f = _resolve_entry(ds)
+        return [d], [f]
+
+    if isinstance(ds, Dataset):
+        filter_list = list(filters) if isinstance(filters, list) else [filters]
+        if not filter_list:
+            raise ValueError("tornado_plot: 'filters' list must be non-empty.")
+        return [ds] * len(filter_list), filter_list
+
+    raise TypeError(
+        "tornado_plot expects a Dataset, a FilteredDataset, or a list of them "
+        f"as the first argument. Got {type(ds).__name__}."
+    )
+
+
 def _draw_tornado(
     ax: "Axes",
     sections: List[Dict[str, Any]],
@@ -397,7 +453,7 @@ def _draw_tornado(
 
 
 def tornado_plot(
-    ds: Union[Dataset, FilteredDataset],
+    ds: Union[Dataset, FilteredDataset, List[Union[Dataset, FilteredDataset]]],
     *,
     property: Union[str, List[str]],
     filters: Union[Dict[str, Any], str, List[Union[Dict[str, Any], str]], None] = None,
@@ -419,18 +475,21 @@ def tornado_plot(
     """
     Render a tornado chart from a Dataset.
 
-    Grid mode: pass a list for ``property`` and/or ``filters`` to render a grid
-    of tornado charts — properties stack across columns, filters stack down
-    rows. A scalar ``property`` and scalar ``filters`` produce a single chart.
+    Grid mode: pass a list for ``property`` and/or ``filters`` (or a list of
+    datasets/views as ``ds``) to render a grid of tornado charts — properties
+    stack across columns, rows stack down. A scalar ``property`` with a single
+    dataset/filter produces a single chart.
 
     Args:
-        ds: Dataset.
+        ds: A Dataset, a FilteredDataset, or a **list** of either — one grid
+            row per list entry. Each FilteredDataset in the list contributes
+            its own filter as that row's selection.
         property: Property to plot (e.g. 'stoiip'), or a list of properties —
                   one column per property.
         filters: Spatial filter dict ({field: value(s)}) or stored-filter name.
                  Must not contain a 'property' key. A list of filters renders
-                 one row per filter. (A FilteredDataset cannot be combined with
-                 a filter list — pass a plain Dataset for filter grids.)
+                 one row per filter. Must be None when ``ds`` is a list (each
+                 entry carries its own filter).
         multiplier: Optional display multiplier override.
         case_selection / selection_criteria: Forwarded to data extraction.
         title, subtitle, outfile, base, reference_case, unit, filter_name,
@@ -445,37 +504,17 @@ def tornado_plot(
     Notes:
     - Each parameter (sheet) becomes one bar; tornado is intrinsically multi-parameter.
     """
-    # --- Resolve a FilteredDataset to (Dataset, filters) ---
-    if isinstance(ds, FilteredDataset):
-        if filters is not None:
-            raise ValueError(
-                "tornado_plot received both a FilteredDataset (which already "
-                "carries a filter) and a filters= argument. Pick one."
-            )
-        view_filters = dict(ds.filters) if ds.filters else {}
-        if ds.title:
-            view_filters['title'] = ds.title
-        filters = view_filters or None
-        ds = ds.dataset
+    # --- Resolve ds + filters into per-row (Dataset, filter) pairs ---
+    datasets, row_filters = _resolve_rows(ds, filters)
 
-    if not isinstance(ds, Dataset):
-        raise TypeError(
-            "tornado_plot expects a Dataset or FilteredDataset as first "
-            f"argument. Got {type(ds).__name__}."
-        )
-
-    # --- Normalise property / filters to lists; detect grid mode ---
-    prop_is_list = isinstance(property, list)
-    filt_is_list = isinstance(filters, list)
-    properties = list(property) if prop_is_list else [property]
-    filter_list = list(filters) if filt_is_list else [filters]
-    is_grid = prop_is_list or filt_is_list
-
-    if not properties or not filter_list:
-        raise ValueError("tornado_plot: 'property' and 'filters' lists must be non-empty.")
+    # --- Normalise property to a list; detect grid mode ---
+    properties = list(property) if isinstance(property, list) else [property]
+    if not properties:
+        raise ValueError("tornado_plot: 'property' list must be non-empty.")
 
     s = _build_settings(settings)
-    nrows, ncols = len(filter_list), len(properties)
+    nrows, ncols = len(datasets), len(properties)
+    is_grid = nrows > 1 or ncols > 1
 
     # --- Figure sizing ---
     if figsize is not None:
@@ -483,7 +522,7 @@ def tornado_plot(
     elif is_grid:
         # Tornado cells need height proportional to the number of bars
         # (one bar per sheet) so labels stay legible.
-        n_bars_est = max(1, len(ds.parameters()) - 1)
+        n_bars_est = max(1, len(datasets[0].parameters()) - 1)
         cell_h = max(s["grid_cell_height"], s["grid_bar_inches"] * n_bars_est + 2.0)
         fig_w = s["grid_cell_width"] * ncols
         fig_h = cell_h * nrows
@@ -510,10 +549,10 @@ def tornado_plot(
     col_labels: List[str] = []
     row_labels: List[str] = []
     for c, prop in enumerate(properties):
-        for r, flt in enumerate(filter_list):
+        for r in range(nrows):
             ax = axes[r][c]
-            sections = ds._tornado_data(
-                property=prop, filters=flt, multiplier=multiplier, skip=skip,
+            sections = datasets[r]._tornado_data(
+                property=prop, filters=row_filters[r], multiplier=multiplier, skip=skip,
                 case_selection=case_selection, selection_criteria=selection_criteria,
             )
             if isinstance(sections, tuple):
@@ -538,7 +577,8 @@ def tornado_plot(
                     else str(pn).title()
                 )
             if c == 0:
-                row_labels.append(detected.get("filter_name") or _filter_label(flt, r))
+                row_labels.append(detected.get("filter_name")
+                                   or _filter_label(row_filters[r], r))
 
     # --- Figure title ---
     fig.text(0.5, 0.975, title, ha="center", va="top",

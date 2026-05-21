@@ -120,12 +120,13 @@ inherently across all sheets.
 ## Plot grids
 
 `tornado_plot` and `distribution_plot` render a grid of subplots when you pass a
-**list** for `property` and/or `filters`. Properties stack across columns,
-filters stack down rows. A scalar `property` with scalar `filters` still
-produces a single plot.
+**list** for `property` (→ columns) and/or the rows (→ rows). Rows can be given
+three ways — a list of `filters`, or a list of `FilteredDataset` views, or a
+list of `Dataset`s as the first argument. A single dataset/filter with a scalar
+`property` still produces one plot.
 
 ```python
-# 2x2 grid: filters -> rows, properties -> columns
+# Rows from a filter list: filters -> rows, properties -> columns
 fig, axes, _ = distribution_plot(
     ds, parameter="Full_Uncertainty",
     property=["stoiip", "giip"],
@@ -134,10 +135,17 @@ fig, axes, _ = distribution_plot(
 )
 # axes is a 2-D array: axes[row][col] — axes[0][0] is CMain / STOIIP
 
+# Rows from a list of filtered views (handy when the views already exist)
+fig, axes, _ = distribution_plot(
+    [ds.filter("Cerisa Main"), ds.filter("Cerisa West")],
+    parameter="Full_Uncertainty",
+    property="stoiip",
+    color=["blue", "red"],          # one colour per row
+)
+
 fig, axes, _ = tornado_plot(
-    ds,
+    [ds.filter("Cerisa Main"), ds.filter("Cerisa West")],
     property=["stoiip", "giip"],
-    filters=["Cerisa Main", "Cerisa West"],
 )
 ```
 
@@ -147,11 +155,15 @@ so the subplots stay as large as possible. The figure auto-sizes to the grid;
 pass `figsize=(w, h)` for an explicit total size, or tune the `settings` keys
 `grid_cell_width` / `grid_cell_height` / `grid_wspace` / `grid_hspace`.
 
+`distribution_plot`'s `color` accepts a list — one entry per row, cycled if
+shorter. Each entry is a scheme name (`blue`, `red`, `green`, `orange`,
+`purple`, `fuchsia`, `yellow`) or any literal matplotlib colour (hex / CSS
+name).
+
 Single-plot mode still returns `(fig, ax, saved)`; in grid mode `ax` is the 2-D
 array of axes. A row's label comes from a stored-preset name, a `title` key in
-an inline filter dict, or a generated fallback. A `FilteredDataset` already
-carries one filter, so it can't be combined with a filter list — pass a plain
-`Dataset` for filter grids.
+an inline filter dict, or a generated fallback. When `ds` is a list, each entry
+carries its own filter, so `filters=` must be left as `None`.
 
 ## Base / reference cases
 
