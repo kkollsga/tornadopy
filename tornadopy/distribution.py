@@ -508,11 +508,15 @@ def distribution_plot(
         if not params:
             raise ValueError("Dataset has no parameters.")
         parameter = params[0]
-        warnings.warn(
-            f"distribution_plot: 'parameter' not specified — defaulting to "
-            f"'{parameter}'. Available parameters: {params}",
-            stacklevel=2,
-        )
+        # Only warn when there's ambiguity. Single-parameter datasets (clipboard
+        # paste, single-sheet Excel) make the default unambiguous; the warning
+        # was just noise in the cell output before the plot rendered.
+        if len(params) > 1:
+            warnings.warn(
+                f"distribution_plot: 'parameter' not specified — defaulting to "
+                f"'{parameter}'. Available parameters: {params}",
+                stacklevel=2,
+            )
 
     s = _build_settings(settings)
 

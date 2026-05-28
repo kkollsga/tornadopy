@@ -83,11 +83,12 @@ def correlation_plot(
         if not params:
             raise ValueError("Dataset has no parameters.")
         parameter = params[0]
-        warnings.warn(
-            f"correlation_plot: 'parameter' not specified — defaulting to '{parameter}'. "
-            f"Available parameters: {params}",
-            stacklevel=2,
-        )
+        if len(params) > 1:
+            warnings.warn(
+                f"correlation_plot: 'parameter' not specified — defaulting to '{parameter}'. "
+                f"Available parameters: {params}",
+                stacklevel=2,
+            )
 
     correlation_data = ds._correlation_data(
         parameter=parameter,

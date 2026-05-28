@@ -4,6 +4,8 @@ ipywidgets is imported lazily so the package stays importable in non-Jupyter
 environments and without the optional dependency.
 """
 
+import re
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 from .processor import Dataset, FilteredDataset
@@ -39,6 +41,30 @@ def _import_widgets():
     return widgets, display
 
 
+def _format_filter_summary(filters: Optional[Dict[str, Any]]) -> str:
+    """Render an active-filter dict as a single human-readable line.
+
+    Used as both the plot subtitle and (sanitised) the exported filename.
+    """
+    if not filters:
+        return ""
+    parts = []
+    for k, v in filters.items():
+        if k in ("title", "name"):
+            continue
+        if isinstance(v, (list, tuple)):
+            parts.append(f"{k}: {', '.join(str(x) for x in v)}")
+        else:
+            parts.append(f"{k}: {v}")
+    return " | ".join(parts)
+
+
+def _filename_safe(text: str) -> str:
+    """Reduce a string to filesystem-safe characters."""
+    cleaned = re.sub(r"[^\w\-]+", "_", text).strip("_")
+    return cleaned or "plot"
+
+
 def build_interactive(
     *,
     ds: Any,
@@ -51,19 +77,9 @@ def build_interactive(
     """Build a JupyterLab widget with property + filter pickers on top and the
     plot below, re-rendering on every change.
 
-    Args:
-        ds: Original first-arg passed to the plot function (Dataset,
-            FilteredDataset, list of either, or pandas DataFrame already
-            wrapped). The active Dataset is recovered with _resolve_dataset.
-        plot_fn: The non-interactive plot callable (distribution_plot or
-            tornado_plot).
-        plot_label: Human-readable label for the widget header.
-        default_property: Property to preselect (auto-detected by the caller).
-        base_kwargs: Kwargs to forward to plot_fn on every render (excluding
-            property, filters, parameter, interactive).
-        pick_parameter: When True and the dataset has more than one parameter,
-            adds a parameter dropdown. Tornado uses False (it spans all
-            parameters intrinsically).
+    The settings panel ends with a Title text field plus PNG/SVG export
+    buttons; exported files are named ``{title}_{filter-summary}.{ext}`` in
+    the current working directory.
     """
     widgets, display = _import_widgets()
     import matplotlib.pyplot as plt
@@ -71,6 +87,9 @@ def build_interactive(
     dataset = _resolve_dataset(ds)
 
     initial_param = base_kwargs.pop("parameter", None)
+    # Title is sourced from the input widget below, not from base_kwargs.
+    initial_title = base_kwargs.pop("title", None)
+
     params = dataset.parameters()
     if not params:
         raise ValueError("Dataset has no parameters to plot.")
@@ -125,6 +144,24 @@ def build_interactive(
 
     _rebuild_field_widgets(initial_param)
 
+    title_widget = widgets.Text(
+        value=initial_title or "",
+        description="Title:",
+        placeholder="optional figure title (also used in export filename)",
+        style={"description_width": "initial"},
+        layout=widgets.Layout(width="420px"),
+    )
+    png_button = widgets.Button(
+        description="Export PNG", button_style="primary",
+        layout=widgets.Layout(width="140px"),
+    )
+    svg_button = widgets.Button(
+        description="Export SVG",
+        layout=widgets.Layout(width="140px"),
+    )
+    status_label = widgets.HTML(value="")
+    export_row = widgets.HBox([png_button, svg_button, status_label])
+
     header = widgets.HTML(
         f"<div style='font-weight:600;font-size:13px;margin-bottom:6px;'>"
         f"{plot_label} — interactive filters</div>"
@@ -132,35 +169,84 @@ def build_interactive(
     output = widgets.Output()
     controls_box = widgets.VBox([])
 
-    def _render(*_: Any) -> None:
-        parameter = param_widget.value if param_widget is not None else initial_param
-        prop = prop_widget.value
+    # Cache the latest render context so exports re-run the same plot with
+    # outfile= set, without diverging from what the user is currently seeing.
+    _state: Dict[str, Any] = {"filters": None, "title": "", "kwargs": {}}
+
+    def _current_filters_dict() -> Dict[str, Any]:
         filters: Dict[str, Any] = {}
         for field, w in field_widgets.items():
             selected = list(w.value)
             all_opts = list(w.options)
-            # Only filter when the user has narrowed below "all selected".
             if selected and len(selected) < len(all_opts):
                 filters[field] = selected
+        return filters
+
+    def _build_kwargs(active_filters: Dict[str, Any], title: str,
+                      outfile: Optional[str] = None) -> Dict[str, Any]:
+        parameter = param_widget.value if param_widget is not None else initial_param
+        prop = prop_widget.value
+        # Attach a 'title' to filters so the active selection bubbles into the
+        # plot's subtitle via FilterManager.resolve_filter_title.
+        filters_with_label: Optional[Dict[str, Any]] = None
+        if active_filters:
+            filters_with_label = dict(active_filters)
+            summary = _format_filter_summary(active_filters)
+            if summary:
+                filters_with_label["title"] = summary
+        kwargs = {
+            **base_kwargs,
+            "property": prop,
+            "filters": filters_with_label,
+            "interactive": False,
+        }
+        if pick_parameter:
+            kwargs["parameter"] = parameter
+        if title:
+            kwargs["title"] = title
+        if outfile is not None:
+            kwargs["outfile"] = outfile
+        return kwargs
+
+    def _render(*_: Any) -> None:
+        active = _current_filters_dict()
+        title = title_widget.value.strip()
+        _state["filters"] = active
+        _state["title"] = title
+        kwargs = _build_kwargs(active, title)
+        _state["kwargs"] = kwargs
         with output:
             output.clear_output(wait=True)
-            kwargs = {
-                **base_kwargs,
-                "property": prop,
-                "filters": filters or None,
-                "interactive": False,
-            }
-            if pick_parameter:
-                kwargs["parameter"] = parameter
             try:
                 fig, _ax, _saved = plot_fn(ds, **kwargs)
                 display(fig)
                 plt.close(fig)
-            except Exception as exc:  # surface inside the widget rather than tracebacking
+            except Exception as exc:
                 display(widgets.HTML(
                     f"<pre style='color:#b00;white-space:pre-wrap'>"
                     f"{type(exc).__name__}: {exc}</pre>"
                 ))
+
+    def _export(ext: str) -> None:
+        title_part = _filename_safe(_state["title"] or plot_label.lower())
+        filter_summary = _format_filter_summary(_state["filters"])
+        filter_part = _filename_safe(filter_summary) if filter_summary else "all"
+        fname = f"{title_part}__{filter_part}.{ext}"
+        kwargs = _build_kwargs(_state["filters"] or {}, _state["title"],
+                               outfile=fname)
+        try:
+            fig, _ax, saved = plot_fn(ds, **kwargs)
+            plt.close(fig)
+            full = Path(saved).resolve()
+            status_label.value = (
+                f"<span style='color:#0a0;margin-left:8px;'>Saved: "
+                f"{full.name}</span>"
+            )
+        except Exception as exc:
+            status_label.value = (
+                f"<span style='color:#b00;margin-left:8px;'>"
+                f"Export failed: {type(exc).__name__}: {exc}</span>"
+            )
 
     def _on_parameter_change(change: Any) -> None:
         new_param = change["new"]
@@ -184,11 +270,20 @@ def build_interactive(
             items.append(param_widget)
         items.append(prop_widget)
         items.extend(field_widgets.values())
+        # Title + export controls live at the bottom of the settings div.
+        items.append(widgets.HTML(
+            "<div style='border-top:1px solid #e0e0e0;margin:6px 0 4px;'></div>"
+        ))
+        items.append(title_widget)
+        items.append(export_row)
         controls_box.children = tuple(items)
 
     if param_widget is not None:
         param_widget.observe(_on_parameter_change, names="value")
     prop_widget.observe(_render, names="value")
+    title_widget.observe(_render, names="value")
+    png_button.on_click(lambda _: _export("png"))
+    svg_button.on_click(lambda _: _export("svg"))
     _wire_fields()
     _refresh_controls()
     _render()

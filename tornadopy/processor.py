@@ -974,31 +974,43 @@ class DataExtractor:
     @staticmethod
     @lru_cache(maxsize=512)
     def normalize_filters_cached(filters_tuple: tuple) -> tuple:
-        """Cached version of normalize_filters that works with tuples."""
+        """Cached version of normalize_filters that works with tuples.
+
+        Accepts list/tuple values for multi-value filters — both are treated
+        the same. The caller must hand in fully-hashable input (lists are
+        converted to tuples in ``normalize_filters`` before being cached).
+        """
         filters = dict(filters_tuple)
         normalized = {}
-        
+
         for key, value in filters.items():
             key_norm = ExcelDataLoader.normalize_fieldname(key)
-            
+
             if isinstance(value, str):
                 value_norm = value.strip().lower()
-            elif isinstance(value, list):
+            elif isinstance(value, (list, tuple)):
                 value_norm = tuple(v.strip().lower() if isinstance(v, str) else v for v in value)
             else:
                 value_norm = value
-            
+
             normalized[key_norm] = value_norm
-        
+
         return tuple(sorted(normalized.items()))
-    
+
     def normalize_filters(self, filters: Dict[str, Any]) -> Dict[str, Any]:
         """Normalize filter keys and string values to lowercase."""
         if not filters:
             return {}
-        
-        filters_tuple = tuple(sorted(filters.items()))
-        normalized_tuple = self.normalize_filters_cached(filters_tuple)
+
+        # Convert list values to tuples so the tuple-of-items is hashable
+        # for ``normalize_filters_cached``'s lru_cache. Without this,
+        # multi-value filters (e.g. zones=['a', 'b']) raise
+        # "unhashable type: 'list'" before the cache is even consulted.
+        hashable_items = tuple(
+            (k, tuple(v) if isinstance(v, list) else v)
+            for k, v in sorted(filters.items())
+        )
+        normalized_tuple = self.normalize_filters_cached(hashable_items)
         
         result = {}
         for key, value in normalized_tuple:
@@ -1126,50 +1138,25 @@ class DataExtractor:
         if cache_key in self._extraction_cache:
             cached_values, cached_sources = self._extraction_cache[cache_key]
             return cached_values.copy(), cached_sources.copy()
-        
-        # REMOVED: Warning about summing all segments - it's a valid use case
-        
-        list_fields = {k: v for k, v in filters.items() if isinstance(v, list)}
-        
-        if list_fields:
-            n_rows = len(data_df)
-            combined = np.zeros(n_rows, dtype=np.float64)
-            all_sources = []
-            
-            for field, values in list_fields.items():
-                for value in values:
-                    single_filters = {**filters, field: value}
-                    cols, sources = self.select_columns(
-                        metadata, dynamic_fields, single_filters, parameter, 
-                        cache_key + f"_{field}_{value}",
-                        exclude_qc=True  # Always exclude QC
-                    )
-                    
-                    arr = (
-                        data_df.select(cols)
-                        .select(pl.sum_horizontal(pl.all().cast(pl.Float64, strict=False)))
-                        .to_series()
-                        .to_numpy()
-                    )
-                    combined += arr
-                    all_sources.extend(sources)
-            
-            result = (combined, all_sources)
-        else:
-            cols, sources = self.select_columns(
-                metadata, dynamic_fields, filters, parameter, cache_key,
-                exclude_qc=True  # Always exclude QC
-            )
-            
-            values = (
-                data_df.select(cols)
-                .select(pl.sum_horizontal(pl.all().cast(pl.Float64, strict=False)))
-                .to_series()
-                .to_numpy()
-            )
-            
-            result = (values, sources)
-        
+
+        # Hand list filters straight to select_columns; polars' is_in handles
+        # the union per field, and the AND across fields is the natural
+        # cross-product. Iterating list values separately (the old path) over-
+        # counted columns that satisfied two list filters simultaneously.
+        cols, sources = self.select_columns(
+            metadata, dynamic_fields, filters, parameter, cache_key,
+            exclude_qc=True
+        )
+
+        values = (
+            data_df.select(cols)
+            .select(pl.sum_horizontal(pl.all().cast(pl.Float64, strict=False)))
+            .to_series()
+            .to_numpy()
+        )
+
+        result = (values, sources)
+
         self._extraction_cache[cache_key] = result
         return result[0].copy(), result[1].copy()
     
@@ -2794,6 +2781,34 @@ class StatisticsComputer:
 # MAIN TORNADO PROCESSOR
 # ================================================================
 
+def read_clipboard(**read_kwargs: Any) -> Any:
+    """Read a Petrel volumetrics paste from the clipboard as a pandas DataFrame.
+
+    A thin wrapper around ``pandas.read_clipboard`` that pre-sets
+    ``header=None``, ``dtype=str`` and ``skip_blank_lines=False`` so wide
+    Petrel exports load without the noisy ``DtypeWarning`` (mixed types
+    across ~1700 columns) and without dropping the blank rows that separate
+    the metadata block from the dynamic-field headers.
+
+    Use this in place of ``pd.read_clipboard()`` for a clean paste-and-plot
+    flow::
+
+        from tornadopy import read_clipboard, distribution_plot
+        distribution_plot(read_clipboard(), interactive=True)
+    """
+    try:
+        import pandas as pd
+    except ImportError as e:
+        raise ImportError(
+            "tornadopy.read_clipboard requires pandas; install it with "
+            "`pip install pandas`."
+        ) from e
+    read_kwargs.setdefault("header", None)
+    read_kwargs.setdefault("dtype", str)
+    read_kwargs.setdefault("skip_blank_lines", False)
+    return pd.read_clipboard(**read_kwargs)
+
+
 def _coerce_to_polars(df: Any) -> pl.DataFrame:
     """Convert a pandas (or polars) DataFrame to polars for parse_sheet.
 
@@ -2841,7 +2856,7 @@ class Dataset:
         sheet_name: str = "Data",
         *,
         display_formats: Dict[str, float] = None,
-        base_case: str = "Base_case",
+        base_case: Optional[str] = None,
     ) -> "Dataset":
         """Build a Dataset from a single DataFrame in Petrel volumetrics layout.
 
@@ -2849,6 +2864,10 @@ class Dataset:
         structure as one Excel sheet: optional metadata rows above the
         ``Case`` row, then dynamic-field rows (e.g. Zones / Facies /
         Contact regions), then ``Case`` + data rows below.
+
+        ``base_case`` defaults to ``None`` here — a clipboard paste typically
+        has no separate base-case sheet, and the Excel-only "Base case sheet
+        not found" warning isn't useful in this flow.
         """
         return cls(
             sheets={sheet_name: _coerce_to_polars(df)},
@@ -2862,7 +2881,7 @@ class Dataset:
         *,
         sheet_name: str = "Data",
         display_formats: Dict[str, float] = None,
-        base_case: str = "Base_case",
+        base_case: Optional[str] = None,
         **read_kwargs: Any,
     ) -> "Dataset":
         """Build a Dataset from the system clipboard (Petrel volumetrics paste).
