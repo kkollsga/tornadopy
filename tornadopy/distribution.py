@@ -159,6 +159,44 @@ def _beautiful_bins(data, target_bins, manual_start=None, manual_end=None):
     return np.arange(bin_start, bin_end + beautiful_width, beautiful_width)
 
 
+def _draw_empty_distribution(
+    ax: "Axes",
+    s: Dict[str, Any],
+    *,
+    property_name: str,
+    unit: Optional[str],
+    subtitle_prefix: Optional[str],
+    show_xlabel: bool,
+    show_ylabel: bool,
+) -> None:
+    """Render an empty axes with a "No data" subtitle in place of percentiles.
+
+    Used when the active filter combination selects no columns — keeps the
+    plot frame visible and tells the reader the selection is empty, without
+    raising.
+    """
+    ax.set_facecolor(s["plot_bg_color"])
+    big = s["subtitle_fontsize"]
+    rows: List[List[Tuple[str, float]]] = []
+    if subtitle_prefix:
+        rows.append([(subtitle_prefix, big)])
+    rows.append([("No data", big)])
+    _place_subtitle(ax, rows, s)
+
+    if show_xlabel:
+        x_label = f"{property_name.title()}" + (f" ({unit})" if unit else "")
+        ax.set_xlabel(x_label, fontsize=s["label_fontsize"], color=s["text_color"])
+    if show_ylabel:
+        ax.set_ylabel("Frequency", fontsize=s["label_fontsize"], color=s["text_color"])
+
+    for spine in ['left', 'bottom', 'top']:
+        ax.spines[spine].set_color(s["outline_color"])
+        ax.spines[spine].set_linewidth(1.1)
+    ax.spines['right'].set_visible(False)
+    ax.tick_params(axis='both', colors=s["text_color"], which='both',
+                   labelsize=s["tick_fontsize"])
+
+
 def _place_subtitle(ax: "Axes", rows, s: Dict[str, Any]) -> None:
     """Render a centred subtitle above ``ax`` from one or more rows.
 
@@ -600,48 +638,92 @@ def distribution_plot(
     for c, prop in enumerate(properties):
         for r in range(nrows):
             ax = axes[r][c]
-            dist_meta = datasets[r]._distribution_data(
-                parameter=parameter, property=prop,
-                filters=row_filters[r], multiplier=multiplier,
-            )
+            # Catch the "filter selects nothing" path (and any extraction
+            # failure) so the cell still renders with a "No data" subtitle
+            # instead of bubbling up a verbose ValueError. The plot frame +
+            # axis labels stay, only the bars/percentiles drop out.
+            try:
+                dist_meta = datasets[r]._distribution_data(
+                    parameter=parameter, property=prop,
+                    filters=row_filters[r], multiplier=multiplier,
+                )
+            except (ValueError, KeyError):
+                dist_meta = None
+
             if isinstance(dist_meta, dict) and 'data' not in dist_meta:
                 raise ValueError(
                     "distribution_plot received multi-property data but expects a "
                     "single property per cell — pass plain strings in the list."
                 )
-            # In grid mode the filter name is the row header, so it is not
-            # repeated in the per-cell subtitle.
-            filter_name = dist_meta.get('filter_name')
-            fill, outline, cell_alpha = _resolve_color(_cell_color(color, r, c))
-            ref_value = _resolve_reference(
-                datasets[r], reference_case, prop, row_filters[r], multiplier,
+
+            # Determine filter_name from the (possibly partial) dist_meta or
+            # fall back to the row's filter title for the "no data" subtitle.
+            if isinstance(dist_meta, dict):
+                filter_name = dist_meta.get('filter_name')
+            else:
+                filter_name = datasets[r].filter_manager.resolve_filter_title(
+                    row_filters[r]
+                )
+
+            # Treat both "no columns matched" and "all values non-finite"
+            # paths as empty.
+            data_arr = (
+                np.asarray(dist_meta["data"], dtype=np.float64)
+                if isinstance(dist_meta, dict) and "data" in dist_meta
+                else np.array([])
             )
-            _draw_distribution(
-                ax, dist_meta, s,
-                clip_min=clip_min, clip_max=clip_max, reference_case=ref_value,
-                reference_label=reference_label,
-                target_bins=target_bins, bin_number=bin_number,
-                bin_start=bin_start, bin_end=bin_end, unit_override=unit,
-                subtitle_prefix=None if is_grid else filter_name,
-                show_xlabel=(r == nrows - 1),
-                show_ylabel=(c == 0),
-                show_cumulative_label=(c == ncols - 1),
-                bar_color=fill, bar_outline_color=outline, bar_alpha=cell_alpha,
-            )
+            has_data = data_arr.size > 0 and np.isfinite(data_arr).any()
+
+            if not has_data:
+                empty_unit = unit
+                if empty_unit is None and isinstance(dist_meta, dict):
+                    empty_unit = dist_meta.get("unit")
+                _draw_empty_distribution(
+                    ax, s,
+                    property_name=str(prop),
+                    unit=empty_unit,
+                    subtitle_prefix=None if is_grid else filter_name,
+                    show_xlabel=(r == nrows - 1),
+                    show_ylabel=(c == 0),
+                )
+            else:
+                fill, outline, cell_alpha = _resolve_color(_cell_color(color, r, c))
+                ref_value = _resolve_reference(
+                    datasets[r], reference_case, prop, row_filters[r], multiplier,
+                )
+                _draw_distribution(
+                    ax, dist_meta, s,
+                    clip_min=clip_min, clip_max=clip_max, reference_case=ref_value,
+                    reference_label=reference_label,
+                    target_bins=target_bins, bin_number=bin_number,
+                    bin_start=bin_start, bin_end=bin_end, unit_override=unit,
+                    subtitle_prefix=None if is_grid else filter_name,
+                    show_xlabel=(r == nrows - 1),
+                    show_ylabel=(c == 0),
+                    show_cumulative_label=(c == ncols - 1),
+                    bar_color=fill, bar_outline_color=outline, bar_alpha=cell_alpha,
+                )
+
             if r == 0:
-                pn = dist_meta.get('property', prop) or prop
+                pn = (
+                    dist_meta.get('property', prop)
+                    if isinstance(dist_meta, dict) else prop
+                ) or prop
                 col_labels.append(
                     pn.upper() if str(pn).lower() in ['npv', 'stoiip', 'giip', 'hcpv']
                     else str(pn).title()
                 )
             if c == 0:
-                row_labels.append(_filter_label(row_filters[r], dist_meta, r))
+                row_labels.append(_filter_label(row_filters[r], dist_meta or {}, r))
 
     # --- Figure title ---
     if title is None:
-        first = datasets[0]._distribution_data(parameter=parameter, property=properties[0],
-                                               filters=row_filters[0], multiplier=multiplier)
-        title = first.get('title', 'Distribution') if isinstance(first, dict) else 'Distribution'
+        try:
+            first = datasets[0]._distribution_data(parameter=parameter, property=properties[0],
+                                                   filters=row_filters[0], multiplier=multiplier)
+            title = first.get('title', 'Distribution') if isinstance(first, dict) else 'Distribution'
+        except (ValueError, KeyError):
+            title = f"{str(parameter).replace('_', ' ')} distribution" if parameter else "Distribution"
     fig.text(0.5, 1.0 - 0.30 / fig_h, title, ha="center", va="top",
              fontsize=s["title_fontsize"], fontweight="bold", color=s["text_color"])
 

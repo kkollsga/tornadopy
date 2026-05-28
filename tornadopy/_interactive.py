@@ -10,6 +10,18 @@ from typing import Any, Callable, Dict, List, Optional
 
 from .processor import Dataset, FilteredDataset
 
+# Palette families exposed by ``_colors._PALETTE``. Kept inline so the widget
+# stays cheap to instantiate (no import of the colors module at widget-build
+# time).
+_PALETTE_FAMILIES = (
+    "slate", "zinc", "stone", "red", "orange", "amber", "yellow", "lime",
+    "green", "emerald", "cyan", "sky", "blue", "violet", "purple", "fuchsia",
+    "rose",
+)
+# Color dropdown options: (label, value). ``None`` keeps the plot's default
+# colour scheme rather than tinting from one hue.
+_COLOR_OPTIONS = [("default", None)] + [(name, name) for name in _PALETTE_FAMILIES]
+
 
 def _resolve_dataset(ds: Any) -> Dataset:
     """Pull the underlying Dataset out of a Dataset/FilteredDataset/list."""
@@ -120,6 +132,17 @@ def build_interactive(
         layout=widgets.Layout(width=_cell_width),
     )
 
+    # Color is pulled into a dropdown so it can be flipped from the widget.
+    # ``base_kwargs`` may carry a caller-supplied color; use it as the initial
+    # value when it matches a known palette family, else fall back to default.
+    initial_color = base_kwargs.pop("color", None)
+    color_value = initial_color if initial_color in (None, *_PALETTE_FAMILIES) else None
+    color_widget = widgets.Dropdown(
+        options=_COLOR_OPTIONS, value=color_value, description="Color:",
+        style={"description_width": "initial"},
+        layout=widgets.Layout(width=_cell_width),
+    )
+
     field_widgets: Dict[str, Any] = {}
 
     def _rebuild_field_widgets(parameter: str) -> None:
@@ -147,6 +170,9 @@ def build_interactive(
 
     _rebuild_field_widgets(initial_param)
 
+    # Title input is one grid cell; the PNG/SVG buttons + status are another.
+    # Buttons stack vertically so each one fits in the narrower cell width.
+    _export_button_w = "110px"
     title_widget = widgets.Text(
         value=initial_title or "",
         description="Title:",
@@ -156,21 +182,21 @@ def build_interactive(
     )
     png_button = widgets.Button(
         description="Export PNG", button_style="primary",
-        layout=widgets.Layout(width="130px"),
+        layout=widgets.Layout(width=_export_button_w),
     )
     svg_button = widgets.Button(
         description="Export SVG",
-        layout=widgets.Layout(width="130px"),
+        layout=widgets.Layout(width=_export_button_w),
     )
-    status_label = widgets.HTML(value="")
-    # Title + export buttons + status together occupy a single grid cell.
-    title_export_cell = widgets.VBox(
+    status_label = widgets.HTML(
+        value="",
+        layout=widgets.Layout(width=_cell_width),
+    )
+    export_cell = widgets.VBox(
         [
-            title_widget,
             widgets.HBox(
                 [png_button, svg_button],
-                layout=widgets.Layout(width=_cell_width,
-                                      justify_content="flex-start"),
+                layout=widgets.Layout(justify_content="flex-start"),
             ),
             status_label,
         ],
@@ -215,6 +241,10 @@ def build_interactive(
             "filters": filters_with_label,
             "interactive": False,
         }
+        # "default" in the dropdown is mapped to None; only forward an
+        # explicit colour so distribution_plot's own default kicks in.
+        if color_widget.value is not None:
+            kwargs["color"] = color_widget.value
         if pick_parameter:
             kwargs["parameter"] = parameter
         if title:
@@ -237,10 +267,32 @@ def build_interactive(
                 display(fig)
                 plt.close(fig)
             except Exception as exc:
-                display(widgets.HTML(
-                    f"<pre style='color:#b00;white-space:pre-wrap'>"
-                    f"{type(exc).__name__}: {exc}</pre>"
-                ))
+                msg = str(exc)
+                # ``select_columns`` raises a verbose diagnostic when the
+                # filter selection matches no columns. Surface a clean
+                # "no data" panel in the widget for that case so picking a
+                # value that doesn't apply to the current property (e.g.
+                # ``facies=undefined`` for a property whose QC balances
+                # perfectly) reads as empty rather than as a crash.
+                no_data = (
+                    "No columns match filters" in msg
+                    or "No valid data points" in msg
+                    or "No numeric data found" in msg
+                    or "No data points remain after clipping" in msg
+                )
+                if no_data:
+                    display(widgets.HTML(
+                        "<div style='padding:28px;text-align:center;"
+                        "color:#888;font-size:13px;border:1px dashed #ccc;"
+                        "border-radius:4px;margin:8px 0;'>"
+                        "No data matches the current filter selection."
+                        "</div>"
+                    ))
+                else:
+                    display(widgets.HTML(
+                        f"<pre style='color:#b00;white-space:pre-wrap'>"
+                        f"{type(exc).__name__}: {exc}</pre>"
+                    ))
 
     def _export(ext: str) -> None:
         title_part = _filename_safe(_state["title"] or plot_label.lower())
@@ -284,9 +336,11 @@ def build_interactive(
         if param_widget is not None:
             cells.append(param_widget)
         cells.append(prop_widget)
+        cells.append(color_widget)
         cells.extend(field_widgets.values())
-        # Title + export buttons share a single grid cell, placed last.
-        cells.append(title_export_cell)
+        # Title input and export buttons each occupy their own cell.
+        cells.append(title_widget)
+        cells.append(export_cell)
 
         # Arrange cells in rows of 3.
         rows = [
@@ -305,6 +359,7 @@ def build_interactive(
     if param_widget is not None:
         param_widget.observe(_on_parameter_change, names="value")
     prop_widget.observe(_render, names="value")
+    color_widget.observe(_render, names="value")
     title_widget.observe(_render, names="value")
     png_button.on_click(lambda _: _export("png"))
     svg_button.on_click(lambda _: _export("svg"))
