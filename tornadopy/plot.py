@@ -259,7 +259,8 @@ def _draw_tornado(
             case_values[-1] += unit_str
         stats_str = "   ".join(case_values)
         if subtitle_prefix and stats_str:
-            subtitle = f"{subtitle_prefix}  |  {stats_str}"
+            # Active filter on its own line above the case-value stats.
+            subtitle = f"{subtitle_prefix}\n{stats_str}"
         else:
             subtitle = subtitle_prefix or stats_str
     if subtitle:

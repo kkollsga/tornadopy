@@ -409,28 +409,47 @@ class ExcelDataLoader:
         if not dynamic_labels:
             dynamic_labels = ["property"]
         
-        # Build combined column headers and detect column types
+        # Build combined column headers and detect column types.
+        #
+        # We keep TWO parallel views per column:
+        #   - ``positional_labels[col]``: one entry per header row, with ""
+        #     preserved for empty cells. The dynamic-field index lines up with
+        #     ``dynamic_labels`` regardless of which rows happen to be empty.
+        #   - ``combined_headers[col]``: the non-empty labels joined with "_"
+        #     (used only as a display/column-name key, and for dedup).
+        #
+        # The positional view fixes a bug where a missing cell in the middle
+        # of the header block (e.g. pandas turning the literal "N/A" facies
+        # value into NaN) collapsed the join, so split("_") would assign a
+        # contact-region label to the facies field downstream.
         header_rows = header_block.to_numpy().tolist()
         combined_headers = []
+        positional_labels: List[List[str]] = []
         column_types = []  # 'qc' or 'segment'
         n_header_rows_list = []
         qc_values = {}
-        
+
         for col_idx in range(len(header_rows[0])):
-            labels = []
+            full = []
+            nonempty = []
             for row in header_rows:
                 val = row[col_idx]
                 if val is not None and str(val).strip():
-                    labels.append(str(val).strip())
-            
-            # Determine column type based on header depth
-            n_headers = len(labels)
+                    cell = str(val).strip()
+                    full.append(cell)
+                    nonempty.append(cell)
+                else:
+                    full.append("")
+            positional_labels.append(full)
+
+            # Determine column type based on the number of populated header rows.
+            n_headers = len(nonempty)
             n_header_rows_list.append(n_headers)
-            
+
             if n_headers == 1:
                 column_type = 'qc'
                 # Extract QC value from first data row
-                property_name_raw = labels[0]
+                property_name_raw = nonempty[0]
                 property_name, unit = self.unit_manager.parse_property_unit(property_name_raw)
                 property_clean = property_name.strip().lower()
 
@@ -444,9 +463,9 @@ class ExcelDataLoader:
                         pass
             else:
                 column_type = 'segment'
-            
+
             column_types.append(column_type)
-            combined_headers.append("_".join(labels) if labels else "")
+            combined_headers.append("_".join(nonempty) if nonempty else "")
         
         # Deduplicate column headers by appending suffix (_2, _3, ...)
         seen_counts: Dict[str, int] = {}
@@ -458,50 +477,70 @@ class ExcelDataLoader:
                 seen_counts[header] = 1
 
         data_block.columns = combined_headers
-        data_block = data_block.select([
-            col for col in data_block.columns 
+        # ``data_block.select`` reorders / drops columns; track the original
+        # indices so we can recover the per-column positional_labels entry
+        # without relying on split("_") of the combined name.
+        kept_original_indices = [
+            i for i, col in enumerate(combined_headers)
             if col and not col.startswith("_")
+        ]
+        data_block = data_block.select([
+            combined_headers[i] for i in kept_original_indices
         ])
-        
+
         if "Case" in data_block.columns:
             data_block = data_block.rename({"Case": "property"})
-        
+
         # Build column metadata table with column_type
         metadata_rows = []
-        col_type_idx = 0
+        n_dyn = len(dynamic_labels)
         for idx, col_name in enumerate(data_block.columns):
             if col_name.startswith("$") or col_name.lower().startswith("property"):
                 continue
-            
-            # Get the column type for this data column
-            # Need to map back to original column index
-            original_col_idx = idx
-            if original_col_idx < len(column_types):
-                col_type = column_types[original_col_idx]
-                n_headers = n_header_rows_list[original_col_idx]
+
+            orig_idx = (
+                kept_original_indices[idx]
+                if idx < len(kept_original_indices)
+                else idx
+            )
+            if orig_idx < len(column_types):
+                col_type = column_types[orig_idx]
+                n_headers = n_header_rows_list[orig_idx]
+                full_labels = positional_labels[orig_idx]
             else:
-                col_type = 'segment'  # Default
-                n_headers = len(dynamic_labels) + 1
-            
-            parts = col_name.split("_")
-            property_name_raw = parts[-1] if parts else col_name
-            
+                col_type = 'segment'
+                n_headers = n_dyn + 1
+                full_labels = []
+
+            # The property always lives in the LAST header row (the Case row),
+            # so prefer that position over split("_") (which a value
+            # containing an underscore would corrupt anyway).
+            if full_labels and full_labels[-1]:
+                property_name_raw = full_labels[-1]
+            else:
+                property_name_raw = col_name.split("_")[-1] if col_name else col_name
+
             property_name, unit = self.unit_manager.parse_property_unit(property_name_raw)
-            
+
             meta = {
                 "column_name": col_name,
                 "column_index": idx,
                 "property": property_name.strip().lower(),
-                "column_type": col_type,  # NEW
-                "n_header_rows": n_headers  # NEW
+                "column_type": col_type,
+                "n_header_rows": n_headers,
             }
-            
+
+            # Positional assignment: header row i (i < n_dyn) → dynamic_labels[i].
+            # The Case row is full_labels[-1] = full_labels[n_dyn] and is the
+            # property, so it's not assigned to any dynamic field. An empty
+            # cell in row i records as None for that field (not shifted).
             for field_idx, field_name in enumerate(dynamic_labels):
-                if field_idx < len(parts) - 1:
-                    meta[field_name] = parts[field_idx].strip().lower()
+                if field_idx < len(full_labels) - 1:
+                    cell = full_labels[field_idx].strip().lower()
+                    meta[field_name] = cell if cell else None
                 else:
                     meta[field_name] = None
-            
+
             metadata_rows.append(meta)
         
         metadata_df = pl.DataFrame(metadata_rows) if metadata_rows else pl.DataFrame()

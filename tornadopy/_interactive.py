@@ -98,12 +98,15 @@ def build_interactive(
             (p for p in params if p != dataset.base_case_parameter), params[0]
         )
 
+    # Defined later so all widgets share the same column width.
+    _cell_width = "280px"
+
     param_widget = None
     if pick_parameter and len(params) > 1:
         param_widget = widgets.Dropdown(
             options=params, value=initial_param, description="Parameter:",
             style={"description_width": "initial"},
-            layout=widgets.Layout(width="320px"),
+            layout=widgets.Layout(width=_cell_width),
         )
 
     properties = sorted(dataset.properties(initial_param))
@@ -114,7 +117,7 @@ def build_interactive(
     prop_widget = widgets.Dropdown(
         options=properties, value=default_property, description="Property:",
         style={"description_width": "initial"},
-        layout=widgets.Layout(width="320px"),
+        layout=widgets.Layout(width=_cell_width),
     )
 
     field_widgets: Dict[str, Any] = {}
@@ -139,7 +142,7 @@ def build_interactive(
                 description=f"{field}:",
                 style={"description_width": "initial"},
                 rows=min(6, len(values)),
-                layout=widgets.Layout(width="320px"),
+                layout=widgets.Layout(width=_cell_width),
             )
 
     _rebuild_field_widgets(initial_param)
@@ -147,20 +150,32 @@ def build_interactive(
     title_widget = widgets.Text(
         value=initial_title or "",
         description="Title:",
-        placeholder="optional figure title (also used in export filename)",
+        placeholder="figure title (and export filename)",
         style={"description_width": "initial"},
-        layout=widgets.Layout(width="420px"),
+        layout=widgets.Layout(width=_cell_width),
     )
     png_button = widgets.Button(
         description="Export PNG", button_style="primary",
-        layout=widgets.Layout(width="140px"),
+        layout=widgets.Layout(width="130px"),
     )
     svg_button = widgets.Button(
         description="Export SVG",
-        layout=widgets.Layout(width="140px"),
+        layout=widgets.Layout(width="130px"),
     )
     status_label = widgets.HTML(value="")
-    export_row = widgets.HBox([png_button, svg_button, status_label])
+    # Title + export buttons + status together occupy a single grid cell.
+    title_export_cell = widgets.VBox(
+        [
+            title_widget,
+            widgets.HBox(
+                [png_button, svg_button],
+                layout=widgets.Layout(width=_cell_width,
+                                      justify_content="flex-start"),
+            ),
+            status_label,
+        ],
+        layout=widgets.Layout(width=_cell_width),
+    )
 
     header = widgets.HTML(
         f"<div style='font-weight:600;font-size:13px;margin-bottom:6px;'>"
@@ -265,18 +280,27 @@ def build_interactive(
             w.observe(_render, names="value")
 
     def _refresh_controls() -> None:
-        items: List[Any] = []
+        cells: List[Any] = []
         if param_widget is not None:
-            items.append(param_widget)
-        items.append(prop_widget)
-        items.extend(field_widgets.values())
-        # Title + export controls live at the bottom of the settings div.
-        items.append(widgets.HTML(
-            "<div style='border-top:1px solid #e0e0e0;margin:6px 0 4px;'></div>"
-        ))
-        items.append(title_widget)
-        items.append(export_row)
-        controls_box.children = tuple(items)
+            cells.append(param_widget)
+        cells.append(prop_widget)
+        cells.extend(field_widgets.values())
+        # Title + export buttons share a single grid cell, placed last.
+        cells.append(title_export_cell)
+
+        # Arrange cells in rows of 3.
+        rows = [
+            widgets.HBox(
+                cells[i:i + 3],
+                layout=widgets.Layout(
+                    align_items="flex-start",
+                    justify_content="flex-start",
+                    margin="2px 0",
+                ),
+            )
+            for i in range(0, len(cells), 3)
+        ]
+        controls_box.children = tuple(rows)
 
     if param_widget is not None:
         param_widget.observe(_on_parameter_change, names="value")

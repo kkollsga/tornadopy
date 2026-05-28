@@ -5,7 +5,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union, TYPE_CHECKING
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.ticker import AutoMinorLocator, MultipleLocator
-from matplotlib.offsetbox import TextArea, HPacker, AnnotationBbox
+from matplotlib.offsetbox import TextArea, HPacker, VPacker, AnnotationBbox
 
 from .processor import Dataset, FilteredDataset
 from ._colors import _PALETTE, _DEFAULT_SHADE_IDX, _resolve_color, _cell_color, _gap_fraction
@@ -159,21 +159,35 @@ def _beautiful_bins(data, target_bins, manual_start=None, manual_end=None):
     return np.arange(bin_start, bin_end + beautiful_width, beautiful_width)
 
 
-def _place_subtitle(ax: "Axes", segments, s: Dict[str, Any]) -> None:
-    """Render a centred subtitle above ``ax`` from per-segment (text, size) pairs.
+def _place_subtitle(ax: "Axes", rows, s: Dict[str, Any]) -> None:
+    """Render a centred subtitle above ``ax`` from one or more rows.
 
-    Mixed font sizes in one line — used so the labels can be smaller than the
-    numbers. Replaces ``ax.set_title`` (which is single-size).
+    ``rows`` is a list where each entry is itself a list of ``(text, fontsize)``
+    pairs that pack horizontally. Multiple rows pack vertically, so callers can
+    put e.g. the active filter on one row and the P10/P50/P90 numbers on a
+    separate row below the figure title.
     """
-    children = [
-        TextArea(text, textprops=dict(
-            fontsize=fs, color=s["text_color"], alpha=0.85,
-        ))
-        for text, fs in segments if text
-    ]
-    if not children:
+    # Back-compat: a flat ``[(text, fs), ...]`` is treated as a single row.
+    if rows and not isinstance(rows[0], list):
+        rows = [rows]
+    hboxes = []
+    for row_segments in rows:
+        children = [
+            TextArea(text, textprops=dict(
+                fontsize=fs, color=s["text_color"], alpha=0.85,
+            ))
+            for text, fs in row_segments if text
+        ]
+        if children:
+            hboxes.append(HPacker(children=children, align="baseline", sep=0, pad=0))
+    if not hboxes:
         return
-    box = HPacker(children=children, align="baseline", sep=0, pad=0)
+    box = (
+        hboxes[0]
+        if len(hboxes) == 1
+        else VPacker(children=hboxes, align="center",
+                     sep=s.get("subtitle_row_gap", 3), pad=0)
+    )
     ab = AnnotationBbox(
         box, (0.5, 1.0), xycoords="axes fraction",
         xybox=(0.0, s["cell_subtitle_pad"]), boxcoords="offset points",
@@ -252,25 +266,29 @@ def _draw_distribution(
     property_name = dist_meta.get("property", "Value")
     unit_str = f" {unit}" if unit else ""
 
-    # --- Per-cell subtitle: [prefix |] [Ref case: x |] P90 .. P50 .. P10 .. ---
-    # Built as sized segments — the labels (Ref case / P90 / P50 / P10) are
-    # rendered slightly smaller than the numbers.
+    # --- Per-cell subtitle ---
+    # Row 1 (optional): active-filter summary
+    # Row 2 (always):   [Ref case: x  |] P90 .. P50 .. P10 ..  unit
+    # Labels (Ref case / P90 / P50 / P10) render slightly smaller than the
+    # numbers via the mixed-font HPacker in _place_subtitle.
     big = s["subtitle_fontsize"]
     small = max(6.0, big - s["subtitle_label_shrink"])
     sep = "   |   "
-    segments: List[Tuple[str, float]] = []
+    rows: List[List[Tuple[str, float]]] = []
     if subtitle_prefix:
-        segments.append((f"{subtitle_prefix}{sep}", big))
+        rows.append([(subtitle_prefix, big)])
+    stats_row: List[Tuple[str, float]] = []
     if reference_case is not None:
-        segments.append((f"{reference_label}: ", small))
-        segments.append((f"{reference_case:.2f}{sep}", big))
-    segments.append(("P90: ", small))
-    segments.append((f"{p90:.2f}   ", big))
-    segments.append(("P50: ", small))
-    segments.append((f"{p50:.2f}   ", big))
-    segments.append(("P10: ", small))
-    segments.append((f"{p10:.2f}{unit_str}", big))
-    _place_subtitle(ax, segments, s)
+        stats_row.append((f"{reference_label}: ", small))
+        stats_row.append((f"{reference_case:.2f}{sep}", big))
+    stats_row.append(("P90: ", small))
+    stats_row.append((f"{p90:.2f}   ", big))
+    stats_row.append(("P50: ", small))
+    stats_row.append((f"{p50:.2f}   ", big))
+    stats_row.append(("P10: ", small))
+    stats_row.append((f"{p10:.2f}{unit_str}", big))
+    rows.append(stats_row)
+    _place_subtitle(ax, rows, s)
 
     # --- Bins ---
     if bin_number is not None:
@@ -563,7 +581,16 @@ def distribution_plot(
             hspace=_gap_fraction(s["grid_row_gap"], nrows, (top - bottom) * fig_h),
         )
     else:
-        top = s["top_margin"]
+        # In single-cell mode the active filter (if any) becomes a second
+        # subtitle row between the title and the P10/P50/P90 row. Reserve a
+        # bit more headroom so the rows don't collide with the figure title.
+        will_show_filter_row = False
+        f0 = row_filters[0] if row_filters else None
+        if isinstance(f0, dict):
+            will_show_filter_row = bool(f0.get("title") or f0.get("name"))
+        elif isinstance(f0, str):
+            will_show_filter_row = True
+        top = s["top_margin"] - (0.05 if will_show_filter_row else 0.0)
         fig.subplots_adjust(left=s["left_margin"], right=s["right_margin"],
                             bottom=s["bottom_margin"], top=top)
 
