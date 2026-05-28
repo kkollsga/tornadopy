@@ -10,6 +10,49 @@ from matplotlib.offsetbox import TextArea, HPacker, AnnotationBbox
 from .processor import Dataset, FilteredDataset
 from ._colors import _PALETTE, _DEFAULT_SHADE_IDX, _resolve_color, _cell_color, _gap_fraction
 
+
+_AUTO_PROPERTY_PRIORITY = ("stoiip", "giip", "hcpv oil", "hcpv gas", "pore volume")
+
+
+def _is_pandas_df(obj: Any) -> bool:
+    """Lightweight pandas DataFrame check that doesn't import pandas eagerly."""
+    for cls in type(obj).__mro__:
+        mod = cls.__module__
+        if (mod == "pandas" or mod.startswith("pandas.")) and cls.__name__ == "DataFrame":
+            return True
+    return False
+
+
+def _maybe_wrap_dataframe(ds: Any) -> Any:
+    """Wrap a pandas DataFrame in a Dataset; pass other inputs through unchanged."""
+    if _is_pandas_df(ds):
+        return Dataset.from_dataframe(ds)
+    if isinstance(ds, list):
+        return [Dataset.from_dataframe(x) if _is_pandas_df(x) else x for x in ds]
+    return ds
+
+
+def _auto_property(datasets: List[Dataset]) -> str:
+    """Pick a sensible default property from the dataset(s).
+
+    Priority: STOIIP → GIIP → HCPV (oil, then gas) → Pore volume. Falls back
+    to the alphabetically-first volumetric property when none of those exist.
+    """
+    available = set()
+    for ds in datasets:
+        for sheet_metadata in ds.metadata.values():
+            if not sheet_metadata.is_empty():
+                available.update(sheet_metadata['property'].to_list())
+    for prop in _AUTO_PROPERTY_PRIORITY:
+        if prop in available:
+            return prop
+    if available:
+        return sorted(available)[0]
+    raise ValueError(
+        "distribution_plot: no properties found in the dataset; "
+        "cannot auto-detect a default for 'property'."
+    )
+
 if TYPE_CHECKING:
     from matplotlib.figure import Figure
     from matplotlib.axes import Axes
@@ -342,9 +385,9 @@ def _draw_distribution(
 
 
 def distribution_plot(
-    ds: Union[Dataset, FilteredDataset, List[Union[Dataset, FilteredDataset]]],
+    ds: Union[Dataset, FilteredDataset, List[Union[Dataset, FilteredDataset]], Any],
     *,
-    property: Union[str, List[str]],
+    property: Union[str, List[str], None] = None,
     parameter: Optional[str] = None,
     filters: Union[Dict[str, Any], str, List[Union[Dict[str, Any], str]], None] = None,
     multiplier: Optional[float] = None,
@@ -362,6 +405,7 @@ def distribution_plot(
     bin_end: Optional[float] = None,
     clip_min: Optional[float] = None,
     clip_max: Optional[float] = None,
+    interactive: bool = False,
 ) -> Tuple["Figure", Union["Axes", Any], Optional[str]]:
     """
     Distribution histogram (with cumulative curve) for one property of one parameter.
@@ -416,11 +460,42 @@ def distribution_plot(
         grid mode where ``axes_2d`` is a 2-D numpy array of Axes indexed
         ``[row][column]``.
     """
+    # --- Accept a pandas DataFrame as ds (single-sheet quick-plot path) ---
+    ds = _maybe_wrap_dataframe(ds)
+
+    # --- Interactive (JupyterLab) mode: build widgets, return container ---
+    if interactive:
+        from ._interactive import build_interactive, _resolve_dataset
+        if isinstance(property, list) and property:
+            default_prop = property[0]
+        elif isinstance(property, str):
+            default_prop = property
+        else:
+            default_prop = _auto_property([_resolve_dataset(ds)])
+        base_kwargs = dict(
+            parameter=parameter, multiplier=multiplier, title=title, unit=unit,
+            outfile=outfile, target_bins=target_bins, color=color,
+            reference_case=reference_case, reference_label=reference_label,
+            figsize=figsize, settings=settings, bin_number=bin_number,
+            bin_start=bin_start, bin_end=bin_end, clip_min=clip_min,
+            clip_max=clip_max,
+        )
+        return build_interactive(
+            ds=ds, plot_fn=distribution_plot,
+            plot_label="Distribution", default_property=default_prop,
+            base_kwargs=base_kwargs, pick_parameter=True,
+        )
+
     # --- Resolve ds + filters into per-row (Dataset, filter) pairs ---
     datasets, row_filters = _resolve_rows(ds, filters)
 
-    # --- Normalise property to a list; detect grid mode ---
-    properties = list(property) if isinstance(property, list) else [property]
+    # --- Normalise property to a list; auto-detect when omitted ---
+    if property is None:
+        properties = [_auto_property(datasets)]
+    elif isinstance(property, list):
+        properties = list(property)
+    else:
+        properties = [property]
     if not properties:
         raise ValueError("distribution_plot: 'property' list must be non-empty.")
 

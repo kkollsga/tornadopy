@@ -370,14 +370,32 @@ class ExcelDataLoader:
                     if values:
                         info_dict[key] = " ".join(values)
         
-        # Find header start
-        header_start = case_row - 1
+        # Find header start by walking back from the Case row through the
+        # dynamic-field rows. Two stop signals:
+        #   1. an empty row in column 0 (the Excel-load path leaves these intact)
+        #   2. a sparse row (the read_clipboard / read_csv path strips blank
+        #      rows, so we fall back to density: metadata rows above the
+        #      dynamic block fill only a handful of cells, while dynamic-field
+        #      rows fill the full width like the Case row)
+        def _row_filled(row_idx: int) -> int:
+            return sum(
+                1 for v in df.row(row_idx)
+                if v is not None and str(v).strip() != ""
+            )
+
+        case_filled = _row_filled(case_row)
+        density_threshold = max(2, case_filled // 2)
+
+        header_start = case_row
         while header_start > 0:
-            val = df[df.columns[0]][header_start]
+            prev = header_start - 1
+            val = df[df.columns[0]][prev]
             if val is None or str(val).strip() == "":
                 break
-            header_start -= 1
-        
+            if _row_filled(prev) < density_threshold:
+                break
+            header_start = prev
+
         header_block = df.slice(header_start, case_row - header_start + 1)
         data_block = df.slice(case_row + 1)
         
@@ -2776,31 +2794,137 @@ class StatisticsComputer:
 # MAIN TORNADO PROCESSOR
 # ================================================================
 
+def _coerce_to_polars(df: Any) -> pl.DataFrame:
+    """Convert a pandas (or polars) DataFrame to polars for parse_sheet.
+
+    Each column is materialised as a Python list of strings (or ``None`` for
+    NaN/NA), then handed to ``pl.DataFrame``. Building via lists avoids the
+    pyarrow dependency that ``pl.from_pandas`` requires for nullable-dtype
+    columns. ``parse_sheet`` casts to Float64 with ``strict=False`` downstream.
+    """
+    if isinstance(df, pl.DataFrame):
+        return df
+    try:
+        import pandas as pd
+    except ImportError as e:
+        raise TypeError(
+            "pandas is required to pass a DataFrame to Dataset; "
+            "install it with `pip install pandas`."
+        ) from e
+    if not isinstance(df, pd.DataFrame):
+        raise TypeError(
+            f"Expected a polars or pandas DataFrame, got {type(df).__name__}."
+        )
+    columns: Dict[str, List[Optional[str]]] = {}
+    for i, col in enumerate(df.columns):
+        # Keep column-name uniqueness for polars; integer-indexed columns
+        # from pd.read_clipboard(header=None) come through as ints.
+        name = str(col) if not isinstance(col, str) else col
+        if name in columns:
+            name = f"{name}__{i}"
+        series = df[col]
+        is_na = series.isna().to_numpy()
+        values = series.to_numpy(dtype=object, na_value=None)
+        columns[name] = [
+            None if is_na[j] else str(values[j]) for j in range(len(values))
+        ]
+    return pl.DataFrame(columns)
+
+
 class Dataset:
     """Main orchestrator for tornado analysis."""
-    
+
+    @classmethod
+    def from_dataframe(
+        cls,
+        df: Any,
+        sheet_name: str = "Data",
+        *,
+        display_formats: Dict[str, float] = None,
+        base_case: str = "Base_case",
+    ) -> "Dataset":
+        """Build a Dataset from a single DataFrame in Petrel volumetrics layout.
+
+        Accepts a pandas or polars DataFrame whose rows follow the same
+        structure as one Excel sheet: optional metadata rows above the
+        ``Case`` row, then dynamic-field rows (e.g. Zones / Facies /
+        Contact regions), then ``Case`` + data rows below.
+        """
+        return cls(
+            sheets={sheet_name: _coerce_to_polars(df)},
+            display_formats=display_formats,
+            base_case=base_case,
+        )
+
+    @classmethod
+    def read_clipboard(
+        cls,
+        *,
+        sheet_name: str = "Data",
+        display_formats: Dict[str, float] = None,
+        base_case: str = "Base_case",
+        **read_kwargs: Any,
+    ) -> "Dataset":
+        """Build a Dataset from the system clipboard (Petrel volumetrics paste).
+
+        Calls ``pandas.read_clipboard`` with ``header=None`` and ``dtype=str``
+        by default so the full metadata block is preserved. Extra kwargs are
+        forwarded to ``pandas.read_clipboard``.
+        """
+        try:
+            import pandas as pd
+        except ImportError as e:
+            raise ImportError(
+                "Dataset.read_clipboard requires pandas; install it with "
+                "`pip install pandas`."
+            ) from e
+        read_kwargs.setdefault("header", None)
+        read_kwargs.setdefault("dtype", str)
+        read_kwargs.setdefault("skip_blank_lines", False)
+        df = pd.read_clipboard(**read_kwargs)
+        return cls.from_dataframe(
+            df,
+            sheet_name=sheet_name,
+            display_formats=display_formats,
+            base_case=base_case,
+        )
+
     def __init__(
         self,
-        filepath: str,
+        filepath: Optional[Union[str, Path]] = None,
         display_formats: Dict[str, float] = None,
-        base_case: str = "Base_case"
+        base_case: str = "Base_case",
+        *,
+        sheets: Optional[Dict[str, pl.DataFrame]] = None,
     ):
-        """Initialize processor with Excel file path and display formatting."""
-        self.filepath = Path(filepath)
-        if not self.filepath.exists():
-            raise FileNotFoundError(f"File not found: {self.filepath}")
-        
+        """Initialize processor with Excel file path and display formatting.
+
+        Pass exactly one of ``filepath`` (Excel file) or ``sheets`` (pre-parsed
+        polars DataFrames keyed by sheet name). The ``sheets`` path is what
+        :meth:`Dataset.from_dataframe` and :meth:`Dataset.read_clipboard` use.
+        """
+        if (filepath is None) == (sheets is None):
+            raise ValueError(
+                "Dataset requires exactly one of 'filepath' or 'sheets'."
+            )
+
         # Initialize managers
         self.unit_manager = UnitManager(display_formats)
         self.filter_manager = FilterManager()
         self.data_extractor = DataExtractor(self.unit_manager)
         self.data_loader = ExcelDataLoader(self.unit_manager)
-        
-        # Load data
-        try:
-            self.sheets_raw = self.data_loader.load_sheets(self.filepath)
-        except Exception as e:
-            raise ValueError(f"Error reading Excel file: {e}")
+
+        if filepath is not None:
+            self.filepath = Path(filepath)
+            if not self.filepath.exists():
+                raise FileNotFoundError(f"File not found: {self.filepath}")
+            try:
+                self.sheets_raw = self.data_loader.load_sheets(self.filepath)
+            except Exception as e:
+                raise ValueError(f"Error reading Excel file: {e}")
+        else:
+            self.filepath = None
+            self.sheets_raw = sheets
         
         # Storage
         self.data: Dict[str, pl.DataFrame] = {}

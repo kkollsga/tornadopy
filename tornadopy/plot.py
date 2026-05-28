@@ -8,6 +8,24 @@ from matplotlib.ticker import AutoMinorLocator, FormatStrFormatter
 from .processor import Dataset, FilteredDataset
 from ._colors import _cell_color, _gap_fraction, _tint_pair
 
+
+def _is_pandas_df(obj: Any) -> bool:
+    """Lightweight pandas DataFrame check that doesn't import pandas eagerly."""
+    for cls in type(obj).__mro__:
+        mod = cls.__module__
+        if (mod == "pandas" or mod.startswith("pandas.")) and cls.__name__ == "DataFrame":
+            return True
+    return False
+
+
+def _maybe_wrap_dataframe(ds: Any) -> Any:
+    """Wrap a pandas DataFrame in a Dataset; pass other inputs through unchanged."""
+    if _is_pandas_df(ds):
+        return Dataset.from_dataframe(ds)
+    if isinstance(ds, list):
+        return [Dataset.from_dataframe(x) if _is_pandas_df(x) else x for x in ds]
+    return ds
+
 if TYPE_CHECKING:
     from matplotlib.figure import Figure
     from matplotlib.axes import Axes
@@ -511,9 +529,9 @@ def _draw_tornado(
 
 
 def tornado_plot(
-    ds: Union[Dataset, FilteredDataset, List[Union[Dataset, FilteredDataset]]],
+    ds: Union[Dataset, FilteredDataset, List[Union[Dataset, FilteredDataset]], Any],
     *,
-    property: Union[str, List[str]],
+    property: Union[str, List[str], None] = None,
     filters: Union[Dict[str, Any], str, List[Union[Dict[str, Any], str]], None] = None,
     multiplier: Optional[float] = None,
     color: Union[str, List[Any], None] = None,
@@ -530,6 +548,7 @@ def tornado_plot(
     preferred_order: Optional[List[str]] = None,
     figsize: Optional[Tuple[float, float]] = None,
     settings: Optional[Dict[str, Any]] = None,
+    interactive: bool = False,
 ) -> Tuple[Optional["Figure"], Union[Optional["Axes"], Any], Optional[str]]:
     """
     Render a tornado chart from a Dataset.
@@ -573,10 +592,44 @@ def tornado_plot(
     Notes:
     - Each parameter (sheet) becomes one bar; tornado is intrinsically multi-parameter.
     """
+    # --- Accept a pandas DataFrame as ds (quick-plot path) ---
+    ds = _maybe_wrap_dataframe(ds)
+
+    # --- Interactive (JupyterLab) mode: build widgets, return container ---
+    if interactive:
+        from ._interactive import build_interactive, _resolve_dataset
+        if isinstance(property, list) and property:
+            default_prop = property[0]
+        elif isinstance(property, str):
+            default_prop = property
+        else:
+            # Use the same priority as distribution_plot for consistency.
+            from .distribution import _auto_property
+            default_prop = _auto_property([_resolve_dataset(ds)])
+        base_kwargs = dict(
+            multiplier=multiplier, color=color, skip=skip,
+            case_selection=case_selection,
+            selection_criteria=selection_criteria, title=title,
+            subtitle=subtitle, outfile=outfile, base=base,
+            reference_case=reference_case, unit=unit,
+            filter_name=filter_name, preferred_order=preferred_order,
+            figsize=figsize, settings=settings,
+        )
+        return build_interactive(
+            ds=ds, plot_fn=tornado_plot,
+            plot_label="Tornado", default_property=default_prop,
+            base_kwargs=base_kwargs, pick_parameter=False,
+        )
+
     # --- Resolve ds + filters into per-row (Dataset, filter) pairs ---
     datasets, row_filters = _resolve_rows(ds, filters)
 
     # --- Normalise property to a list; detect grid mode ---
+    if property is None:
+        raise TypeError(
+            "tornado_plot: 'property' is required. Pass it directly, or use "
+            "tornado_plot(ds, interactive=True) to pick it from a dropdown."
+        )
     properties = list(property) if isinstance(property, list) else [property]
     if not properties:
         raise ValueError("tornado_plot: 'property' list must be non-empty.")

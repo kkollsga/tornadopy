@@ -20,8 +20,17 @@ if TYPE_CHECKING:
     from matplotlib.axes import Axes
 
 
+def _is_pandas_df(obj: Any) -> bool:
+    """Lightweight pandas DataFrame check that doesn't import pandas eagerly."""
+    for cls in type(obj).__mro__:
+        mod = cls.__module__
+        if (mod == "pandas" or mod.startswith("pandas.")) and cls.__name__ == "DataFrame":
+            return True
+    return False
+
+
 def correlation_plot(
-    ds: Union[Dataset, FilteredDataset],
+    ds: Union[Dataset, FilteredDataset, Any],
     *,
     parameter: Optional[str] = None,
     filters: Union[Dict[str, Any], str, None] = None,
@@ -48,6 +57,9 @@ def correlation_plot(
         decimals: Decimals for correlation coefficients (default 2).
         outfile, figsize, settings: Plot styling — same as before.
     """
+    if _is_pandas_df(ds):
+        ds = Dataset.from_dataframe(ds)
+
     if isinstance(ds, FilteredDataset):
         if filters is not None:
             raise ValueError(
