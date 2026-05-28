@@ -181,9 +181,9 @@ def build_interactive(
 
     _rebuild_field_widgets(initial_param)
 
-    # Title input is one grid cell; the PNG/SVG buttons + status are another.
-    # Buttons stack vertically so each one fits in the narrower cell width.
-    _export_button_w = "110px"
+    # Title + Color + Property stack vertically in a single grid cell so the
+    # supporting meta controls take roughly the same vertical space as one
+    # SelectMultiple. The PNG/SVG buttons stack vertically in their own cell.
     title_widget = widgets.Text(
         value=initial_title or "",
         description="Title:",
@@ -193,24 +193,21 @@ def build_interactive(
     )
     png_button = widgets.Button(
         description="Export PNG", button_style="primary",
-        layout=widgets.Layout(width=_export_button_w),
+        layout=widgets.Layout(width=_cell_width),
     )
     svg_button = widgets.Button(
         description="Export SVG",
-        layout=widgets.Layout(width=_export_button_w),
+        layout=widgets.Layout(width=_cell_width),
     )
     status_label = widgets.HTML(
         value="",
         layout=widgets.Layout(width=_cell_width),
     )
+    # The meta cell is populated in _refresh_controls so it stays in sync if
+    # param_widget gets added/removed across parameter changes.
+    meta_cell = widgets.VBox([], layout=widgets.Layout(width=_cell_width))
     export_cell = widgets.VBox(
-        [
-            widgets.HBox(
-                [png_button, svg_button],
-                layout=widgets.Layout(justify_content="flex-start"),
-            ),
-            status_label,
-        ],
+        [png_button, svg_button, status_label],
         layout=widgets.Layout(width=_cell_width),
     )
 
@@ -343,14 +340,16 @@ def build_interactive(
             w.observe(_render, names="value")
 
     def _refresh_controls() -> None:
-        cells: List[Any] = []
+        # Meta cell stacks: [Parameter (when present), Title, Color, Property].
+        meta_children: List[Any] = []
         if param_widget is not None:
-            cells.append(param_widget)
-        cells.append(prop_widget)
-        cells.append(color_widget)
-        cells.extend(field_widgets.values())
-        # Title input and export buttons each occupy their own cell.
-        cells.append(title_widget)
+            meta_children.append(param_widget)
+        meta_children.extend([title_widget, color_widget, prop_widget])
+        meta_cell.children = tuple(meta_children)
+
+        # Filter widgets first, then meta + export cells at the end.
+        cells: List[Any] = list(field_widgets.values())
+        cells.append(meta_cell)
         cells.append(export_cell)
 
         # Arrange cells in rows of 3.
