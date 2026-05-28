@@ -200,22 +200,28 @@ def _draw_empty_distribution(
 def _place_subtitle(ax: "Axes", rows, s: Dict[str, Any]) -> None:
     """Render a centred subtitle above ``ax`` from one or more rows.
 
-    ``rows`` is a list where each entry is itself a list of ``(text, fontsize)``
-    pairs that pack horizontally. Multiple rows pack vertically, so callers can
-    put e.g. the active filter on one row and the P10/P50/P90 numbers on a
-    separate row below the figure title.
+    ``rows`` is a list where each entry is itself a list of segment tuples:
+      - ``(text, fontsize)`` — regular weight (back-compat)
+      - ``(text, fontsize, fontweight)`` — explicit weight ("bold", "normal", …)
+
+    Segments pack horizontally; multiple rows pack vertically.
     """
     # Back-compat: a flat ``[(text, fs), ...]`` is treated as a single row.
     if rows and not isinstance(rows[0], list):
         rows = [rows]
     hboxes = []
     for row_segments in rows:
-        children = [
-            TextArea(text, textprops=dict(
+        children = []
+        for seg in row_segments:
+            text = seg[0]
+            if not text:
+                continue
+            fs = seg[1]
+            weight = seg[2] if len(seg) > 2 else "normal"
+            children.append(TextArea(text, textprops=dict(
                 fontsize=fs, color=s["text_color"], alpha=0.85,
-            ))
-            for text, fs in row_segments if text
-        ]
+                fontweight=weight,
+            )))
         if children:
             hboxes.append(HPacker(children=children, align="baseline", sep=0, pad=0))
     if not hboxes:
@@ -312,10 +318,15 @@ def _draw_distribution(
     big = s["subtitle_fontsize"]
     small = max(6.0, big - s["subtitle_label_shrink"])
     sep = "   |   "
+    prop_disp = (
+        property_name.upper()
+        if str(property_name).lower() in ('npv', 'stoiip', 'giip', 'hcpv')
+        else str(property_name).title()
+    )
     rows: List[List[Tuple[str, float]]] = []
     if subtitle_prefix:
         rows.append([(subtitle_prefix, big)])
-    stats_row: List[Tuple[str, float]] = []
+    stats_row: List[Tuple] = [(f"{prop_disp}{sep}", big, "bold")]
     if reference_case is not None:
         stats_row.append((f"{reference_label}: ", small))
         stats_row.append((f"{reference_case:.2f}{sep}", big))

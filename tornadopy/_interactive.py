@@ -53,10 +53,19 @@ def _import_widgets():
     return widgets, display
 
 
+def _title_case(text: Any) -> str:
+    """Title-case a string and treat underscores as word separators.
+
+    ``contact_regions`` → ``Contact Regions``; ``sand 2`` → ``Sand 2``.
+    """
+    return str(text).replace("_", " ").title()
+
+
 def _format_filter_summary(filters: Optional[Dict[str, Any]]) -> str:
     """Render an active-filter dict as a single human-readable line.
 
     Used as both the plot subtitle and (sanitised) the exported filename.
+    Group labels and values are title-cased for display.
     """
     if not filters:
         return ""
@@ -64,10 +73,12 @@ def _format_filter_summary(filters: Optional[Dict[str, Any]]) -> str:
     for k, v in filters.items():
         if k in ("title", "name"):
             continue
+        key_disp = _title_case(k)
         if isinstance(v, (list, tuple)):
-            parts.append(f"{k}: {', '.join(str(x) for x in v)}")
+            vals = ", ".join(_title_case(x) for x in v)
+            parts.append(f"{key_disp}: {vals}")
         else:
-            parts.append(f"{k}: {v}")
+            parts.append(f"{key_disp}: {_title_case(v)}")
     return " | ".join(parts)
 
 
