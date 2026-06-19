@@ -473,6 +473,7 @@ def distribution_plot(
     clip_min: Optional[float] = None,
     clip_max: Optional[float] = None,
     interactive: bool = False,
+    print_table: bool = False,
 ) -> Tuple["Figure", Union["Axes", Any], Optional[str]]:
     """
     Distribution histogram (with cumulative curve) for one property of one parameter.
@@ -521,6 +522,9 @@ def distribution_plot(
                   "Base case" for ``"auto"``/``"base"``, else "Ref case".
         title, unit, outfile, target_bins, figsize,
         settings, bin_number, bin_start, bin_end: Plot styling — same as before.
+        print_table: When True, print a Markdown table of the per-cell
+                  reference case and P90/P50/P10 volumes (the same values
+                  drawn in each subtitle) to stdout after the figure is built.
 
     Returns:
         ``(fig, ax, saved)`` for a single plot, or ``(fig, axes_2d, saved)`` in
@@ -646,6 +650,7 @@ def distribution_plot(
     # --- Draw each cell ---
     col_labels: List[str] = []
     row_labels: List[str] = []
+    table_records: List[Dict[str, Any]] = []
     for c, prop in enumerate(properties):
         for r in range(nrows):
             ax = axes[r][c]
@@ -702,7 +707,7 @@ def distribution_plot(
                 ref_value = _resolve_reference(
                     datasets[r], reference_case, prop, row_filters[r], multiplier,
                 )
-                _draw_distribution(
+                pct = _draw_distribution(
                     ax, dist_meta, s,
                     clip_min=clip_min, clip_max=clip_max, reference_case=ref_value,
                     reference_label=reference_label,
@@ -714,6 +719,15 @@ def distribution_plot(
                     show_cumulative_label=(c == ncols - 1),
                     bar_color=fill, bar_outline_color=outline, bar_alpha=cell_alpha,
                 )
+                if print_table:
+                    cell_unit = unit if unit is not None else dist_meta.get("unit")
+                    table_records.append({
+                        "selection": _filter_label(row_filters[r], dist_meta, r),
+                        "property": str(dist_meta.get("property", prop) or prop),
+                        "ref": ref_value,
+                        "p90": pct["p90"], "p50": pct["p50"], "p10": pct["p10"],
+                        "unit": cell_unit,
+                    })
 
             if r == 0:
                 pn = (
@@ -762,7 +776,70 @@ def distribution_plot(
         fig.savefig(outfile, bbox_inches="tight", facecolor=s["figure_bg_color"])
         saved = str(outfile)
 
+    # --- Optional Markdown table of reference / P90 / P50 / P10 volumes ---
+    if print_table and table_records:
+        print(_percentile_table_md(
+            table_records, reference_label, title, show_selection=nrows > 1,
+        ))
+
     return fig, (axes if is_grid else axes[0][0]), saved
+
+
+def _percentile_table_md(
+    records: List[Dict[str, Any]],
+    reference_label: str,
+    title: Optional[str],
+    *,
+    show_selection: bool,
+) -> str:
+    """Render per-cell reference/P90/P50/P10 volumes as a Markdown table.
+
+    Columns adapt to the data: the selection column is shown only for multi-row
+    grids, and the reference column only when at least one cell has a reference
+    value. Numbers use the same 2-decimal formatting as the plot subtitles.
+    """
+    show_ref = any(r["ref"] is not None for r in records)
+    units = {r["unit"] for r in records if r["unit"]}
+    one_unit = units.pop() if len(units) == 1 else None
+
+    def _disp_prop(name: str) -> str:
+        return (name.upper() if str(name).lower() in ('npv', 'stoiip', 'giip', 'hcpv')
+                else str(name).title())
+
+    def _num(v: Optional[float]) -> str:
+        return "—" if v is None else f"{v:.2f}"
+
+    headers = ["Property"]
+    if show_selection:
+        headers.insert(0, "Selection")
+    if show_ref:
+        headers.append(reference_label)
+    headers += ["P90", "P50", "P10"]
+    if one_unit is None:
+        headers.append("Unit")
+
+    lines: List[str] = []
+    if title:
+        lines.append(f"**{title}**")
+        lines.append("")
+    lines.append("| " + " | ".join(headers) + " |")
+    lines.append("| " + " | ".join("---" for _ in headers) + " |")
+    for r in records:
+        cells: List[str] = []
+        if show_selection:
+            cells.append(str(r["selection"]))
+        cells.append(_disp_prop(r["property"]))
+        if show_ref:
+            cells.append(_num(r["ref"]))
+        cells += [_num(r["p90"]), _num(r["p50"]), _num(r["p10"])]
+        if one_unit is None:
+            cells.append(str(r["unit"]) if r["unit"] else "—")
+        lines.append("| " + " | ".join(cells) + " |")
+
+    if one_unit is not None:
+        lines.append("")
+        lines.append(f"_Volumes in {one_unit}._")
+    return "\n".join(lines)
 
 
 def _filter_label(flt: Any, dist_meta: Dict[str, Any], row_idx: int) -> str:
